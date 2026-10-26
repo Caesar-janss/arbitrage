@@ -1,0 +1,90 @@
+name: ci
+
+# CI = wasit "test lulus" untuk tim (lihat docs/TEAM_WORKFLOW.md §5).
+on:
+  push:
+    branches: [main, "stage*/**"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_benchmarks:
+        description: "Run BenchmarkDotNet (short job) + 0 B/op gate"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Restore
+        run: dotnet restore ArbEngine.sln
+      - name: Build (src = warnings-as-errors)
+        run: dotnet build ArbEngine.sln -c Release --no-restore
+      - name: Test
+        run: >
+          dotnet test tests/Arb.Core.Tests/Arb.Core.Tests.csproj -c Release --no-build
+          --logger "trx;LogFileName=tests.trx" --logger "console;verbosity=normal"
+          --results-directory TestResults
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults
+
+  db-schema:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psql client
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+      - name: Migrations + scenario tests
+        run: bash db/tests/run_tests.sh | tail -n 40
+
+  benchmarks:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Run BenchmarkDotNet (short job, JSON export)
+        run: dotnet run -c Release --project tests/Arb.Benchmarks -- --filter '*' --job short --exporters json
+      - name: Gate — every benchmark must allocate 0 B/op
+        run: python3 tools/check_bench_alloc.py BenchmarkDotNet.Artifacts/results
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks
+          path: BenchmarkDotNet.Artifacts/results

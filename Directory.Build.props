@@ -1,0 +1,14 @@
+<Project>
+  <!-- Berlaku untuk semua project. src/ menambah TreatWarningsAsErrors (lihat src/Directory.Build.props). -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TieredPGO>true</TieredPGO>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <Features>strict</Features>
+  </PropertyGroup>
+</Project>
