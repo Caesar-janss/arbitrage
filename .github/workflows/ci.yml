@@ -55,7 +55,8 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_PASSWORD: postgres
+          # Ephemeral job-scoped container, reachable only from this runner: no password in the repo at all.
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres"
@@ -64,7 +65,6 @@ jobs:
       PGHOST: localhost
       PGPORT: "5432"
       PGUSER: postgres
-      PGPASSWORD: postgres
     steps:
       - uses: actions/checkout@v4
       - name: Install psql client
