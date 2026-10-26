@@ -38,6 +38,9 @@ jobs:
           dotnet test tests/Arb.Core.Tests/Arb.Core.Tests.csproj -c Release --no-build
           --logger "trx;LogFileName=tests.trx" --logger "console;verbosity=normal"
           --results-directory TestResults
+      - name: Test summary (annotation; fails if 0 tests ran)
+        if: always()
+        run: python3 tools/ci_test_summary.py TestResults 100
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
