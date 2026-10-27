@@ -46,7 +46,7 @@ public class TradeStateMachineTests
     [Fact]
     public void StatesAndTerminalFlags_AreIdenticalToSql()
     {
-        string sql = RepoFiles.ReadAll(TradingMigration);
+        string sql = StripSqlComments(RepoFiles.ReadAll(TradingMigration));
         Match block = Regex.Match(sql, @"INSERT INTO trd\.trade_state \(state, is_terminal, description\) VALUES[^;]*;", RegexOptions.Singleline);
         Assert.True(block.Success, "trade_state INSERT not found");
         int n = 0;
@@ -147,7 +147,7 @@ public class DbContractTests
     [Fact]
     public void RejectReasons_MatchOpportunityDecisionCheck()
     {
-        string sql = RepoFiles.ReadAll("db/migrations/V002__trading.sql");
+        string sql = TradeStateMachineTests.StripSqlComments(RepoFiles.ReadAll("db/migrations/V002__trading.sql"));
         Match m = Regex.Match(sql, @"decision\s+text\s+NOT NULL CHECK \(decision IN \(([^)]*)\)\)", RegexOptions.Singleline);
         Assert.True(m.Success, "decision CHECK not found");
         var fromSql = new HashSet<string>();
@@ -168,7 +168,7 @@ public class DbContractTests
     [Fact]
     public void StrategyCodes_MatchSchema()
     {
-        string sql = RepoFiles.ReadAll("db/migrations/V002__trading.sql");
+        string sql = TradeStateMachineTests.StripSqlComments(RepoFiles.ReadAll("db/migrations/V002__trading.sql"));
         Match m = Regex.Match(sql, @"strategy\s+text\s+NOT NULL CHECK \(strategy IN \(([^)]*)\)\)");
         Assert.True(m.Success, "strategy CHECK not found");
         var fromSql = new HashSet<string>();

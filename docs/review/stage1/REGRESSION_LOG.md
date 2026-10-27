@@ -413,3 +413,40 @@ jadi datanya dikumpulkan di CI: job manual `seqlock-arm64` (`df8d55e`) = listing
 - **HIJAU**: `R16_ExpectedVsRealizedBasisTests 2 passed` (cash TradeGroup = ExpectedCashQuote; 1006 dengan funding = −1,951285
   = DB); full suite `239 passed, 0 failed`; DB `capture ratio = 1 (v0.2: 1.29)`, `shortfall = 0`, capture harian **−2,5986**
   (sengaja berubah dari −3,0823 karena basisnya dikoreksi), `v_rebalance_cost_daily 0.02 vs 1.5`, `ALL TESTS PASSED`.
+
+## R-20 (S4) — test yang lulus karena alasan salah / kasus penting hilang
+
+Daftar (a)–(f) dari laporan Claude-R dan penutupnya:
+
+| | Masalah | Ditutup oleh |
+|---|---|---|
+| a | `SettleTimeout_ReleasesTerminalReservations` meng-*codify* Available yang overstated | diganti `SettleTimeout_FlagsForReconcile_NeverReleases` (commit R-06) |
+| b | semua test pricer `HaircutPpm = 1e6` | `R03_HaircutConsistentPricingTests` (haircut 50 %, kedua sisi) |
+| c | semua test sanity `ReferencePx = 60000` | `R12_SanityReferencePriceTests` (0, NaN, −1, +∞) |
+| d | seqlock hanya x86, tanpa `MarkInvalid` konkuren | `R04_ExternalBookMarksTests` + job CI `seqlock-arm64` (R-05) |
+| e | `RepairMethod` tanpa MANUAL/`ToDbCode`; Side/OrderType/TimeInForce/MarketType tanpa kontrak SQL | `R20_EnumDbContractTests` (commit ini) |
+| f | brute force Q* hanya hurdle 0, tanpa cap/haircut | `R20_OptimizerBruteForceTests` (commit ini) |
+
+Ditambah temuan sejenis saat mengerjakan ronde ini: test kontrak transisi menghitung baris SQL yang di-comment-out
+(diperbaiki di R-10; komentar SQL kini dibuang di **semua** test kontrak), dan satu assert SQL R-02 yang sempat lulus
+karena alasan lain (→ helper `expect_error_like`).
+
+- **MERAH (e, compile)**: `'RepairMethod' does not contain a definition for 'ToDbCode'`, `'Side' …`, `'OrderType' …`,
+  `'TimeInForce' does not contain a definition for 'ToDbCode'`. Mutation check sesudah patch (SQL diubah sementara:
+  `POST_ONLY`→`POSTONLY`, `MANUAL` dihapus) → `FAIL … time_in_force: SQL [FOK,GTC,IOC,POSTONLY] vs C# [FOK,GTC,IOC,POST_ONLY]`,
+  `FAIL … repair_method: SQL […] vs C# […,MANUAL,…]`.
+- **(f) bukan bug kode** (optimizer v0.2 benar; test baru hijau di kode v0.2). Merahnya dibuktikan dengan **mutation testing**:
+  4 mutan yang tidak tertangkap test v0.2 semuanya tertangkap test baru.
+
+  | Mutan pada `CrossedBookOptimizer` | Test v0.2 `MatchesBruteForceArgmax` | Test baru `R20_OptimizerBruteForceTests` |
+  |---|---|---|
+  | M1 hurdle diabaikan | 4 passed | **FAIL** `net 0.0302 vs brute force 0` |
+  | M2 haircut diabaikan | 4 passed | **FAIL** `net 0.1330 vs brute force 0.0765` |
+  | M3 cap notional dihitung pakai bid | 4 passed | **FAIL** `net 0.35801 vs brute force 0.35900` |
+  | M4 cap level off-by-one | 4 passed | **FAIL** `net 0.9156 vs brute force 0.1764` |
+
+  Versi pertama test baru juga lulus pada semua mutan: buku acak hampir tidak pernah crossed. Karena itu test kini
+  mewajibkan cakupan (≥ 100 trial crossed, ≥ 10 berhenti karena hurdle, ≥ 20 karena cap, ≥ 20 memakai haircut).
+- **Patch**: `ToDbCode` untuk `Side`, `OrderType`, `TimeInForce`, `RepairMethod` (+ `Manual`); `StripSqlComments` di semua
+  test kontrak.
+- **HIJAU**: `R20_EnumDbContractTests 4 passed`, `R20_OptimizerBruteForceTests 3 passed`; full suite `246 passed, 0 failed`.

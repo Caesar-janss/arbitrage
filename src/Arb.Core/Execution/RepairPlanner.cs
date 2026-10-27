@@ -5,6 +5,7 @@ using Arb.Core.Primitives;
 
 namespace Arb.Core.Execution;
 
+/// <summary>Mirrors trd.trade_group.repair_method (None = NULL). Contract-tested against the SQL CHECK (R-20).</summary>
 public enum RepairMethod : byte
 {
     None = 0,
@@ -12,6 +13,23 @@ public enum RepairMethod : byte
     CompleteBuyLeg = 2,
     Unwind = 3,
     PerpHedge = 4,
+
+    /// <summary>Resolved by the operator (STUCK → MANUAL_RESOLVED); never planned by RepairPlanner.</summary>
+    Manual = 5,
+}
+
+public static class RepairMethodInfo
+{
+    /// <summary>Code used by PostgreSQL schema (trd.trade_group.repair_method). None has no code (NULL).</summary>
+    public static string ToDbCode(this RepairMethod method) => method switch
+    {
+        RepairMethod.CompleteSellLeg => "COMPLETE_SELL_LEG",
+        RepairMethod.CompleteBuyLeg => "COMPLETE_BUY_LEG",
+        RepairMethod.Unwind => "UNWIND",
+        RepairMethod.PerpHedge => "PERP_HEDGE",
+        RepairMethod.Manual => "MANUAL",
+        _ => throw new ArgumentOutOfRangeException(nameof(method), method, "None is stored as NULL"),
+    };
 }
 
 public enum RepairVerdict : byte
