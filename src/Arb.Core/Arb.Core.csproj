@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Arb.Core: ZERO dependency eksternal, tanpa I/O. Semua logika kalkulasi & state yang bisa diuji deterministik. -->
+  <PropertyGroup>
+    <RootNamespace>Arb.Core</RootNamespace>
+    <AssemblyName>Arb.Core</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Arb.Core.Tests" />
+    <InternalsVisibleTo Include="Arb.Benchmarks" />
+  </ItemGroup>
+
+</Project>
