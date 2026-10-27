@@ -23,9 +23,10 @@ public enum TransitionError : byte
 ///
 ///  CREATED → IN_FLIGHT → COMPLETED                         (spatial, both legs flat)
 ///          ↘ MISSED     ↘ MISSED                            (nothing filled)
-///                       ↘ POSITION_OPEN → EXITING → CLOSED  (funding)
+///                       ↘ POSITION_OPEN ⇄ EXITING → CLOSED  (funding; EXITING → POSITION_OPEN = partial reduce)
 ///                       ↘ RESIDUAL → REPAIRING → REPAIRED / POSITION_OPEN / CLOSED
 ///                       ↘ STUCK ←──────────── (repair failed) → REPAIRING | MANUAL_RESOLVED
+///   POSITION_OPEN → RESIDUAL (a leg liquidated / ADL'd) | STUCK (venue unreachable while holding)
 ///
 /// Strategy rules (also in the DB trigger):
 ///   funding  : never COMPLETED (it ends CLOSED, or REPAIRED when an entry legging is unwound).
@@ -51,7 +52,10 @@ public static class TradeStateMachine
         (TradeState.Repairing, TradeState.Residual),
         (TradeState.Repairing, TradeState.Stuck),
         (TradeState.PositionOpen, TradeState.Exiting),
+        (TradeState.PositionOpen, TradeState.Residual), // R-10: one leg liquidated / ADL'd while holding
+        (TradeState.PositionOpen, TradeState.Stuck),    // R-10: venue unreachable / reconcile failed while holding
         (TradeState.Exiting, TradeState.Closed),
+        (TradeState.Exiting, TradeState.PositionOpen),  // R-10: partial reduce done, the rest stays open
         (TradeState.Exiting, TradeState.Residual),
         (TradeState.Exiting, TradeState.Stuck),
         (TradeState.Stuck, TradeState.Repairing),

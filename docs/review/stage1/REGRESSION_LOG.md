@@ -92,3 +92,33 @@ di sandbox; lihat `STAGE1_CORE.md` §7). CI GitHub menjalankan xUnit asli pada c
   PASS  R-02: REPAIRED dengan perp terbuka tetap di v_open_exposure
   ALL TESTS PASSED
   ```
+
+## R-10 (S2) — tidak ada jalur likuidasi/ADL, venue down, dan partial reduce saat posisi ditahan
+
+- **Test C#**: `Regression/R10_PositionLifecycleTests.cs` (7; API lama → merah perilaku), skenario P06.
+  **Test SQL**: trade 1010 (reduce → likuidasi → tutup), 1011 (POSITION_OPEN → STUCK) di blok regression.
+- **MERAH (perilaku)**:
+  ```
+  FAIL R10_PositionLifecycleTests.TransitionExists(PositionOpen, Residual)   PositionOpen -> Residual must be legal
+  FAIL R10_PositionLifecycleTests.TransitionExists(PositionOpen, Stuck)      PositionOpen -> Stuck must be legal
+  FAIL R10_PositionLifecycleTests.TransitionExists(Exiting, PositionOpen)    Exiting -> PositionOpen must be legal
+  FAIL …PartialReduce_ReturnsToPositionOpen_AndStaysNonTerminal              Expected: None  Actual: IllegalTransition
+  FAIL …ShortLegLiquidated_WhileHolding_BecomesResidual_…                    Expected: None  Actual: IllegalTransition
+  FAIL …TradeGroup_Liquidation_And_PartialReduce_EndToEnd                    Expected: None  Actual: IllegalTransition
+  FAIL …VenueUnreachable_WhileHolding_IsStuck_NotSilentlyOpen                Expected: None  Actual: IllegalTransition
+  TOTAL: 0 passed, 7 failed
+  ```
+  SQL: `ERROR:  trade 1010: transisi ilegal EXITING -> POSITION_OPEN`
+- **Patch**: transisi `POSITION_OPEN→RESIDUAL`, `POSITION_OPEN→STUCK`, `EXITING→POSITION_OPEN` di
+  `TradeStateMachine` dan `V007` (23 transisi). Test kontrak sekarang membaca **semua** migrasi.
+- **Temuan sampingan saat mutation check** (kelas R-20): test kontrak v0.2 juga menghitung baris yang
+  **di-comment-out** (`-- ('POSITION_OPEN','STUCK')` tetap terbaca → test tetap hijau). Diperbaiki: komentar SQL dibuang
+  sebelum parsing; mutasi yang sama sekarang merah (`Expected: 23  Actual: 22`).
+- **HIJAU**:
+  ```
+  R10_PositionLifecycleTests              7 passed
+  full suite: TOTAL: 174 passed, 0 failed
+  PASS  R-10: urutan state 1010 (reduce → likuidasi → tutup)  = CREATED>IN_FLIGHT>POSITION_OPEN>EXITING>POSITION_OPEN>RESIDUAL>REPAIRING>CLOSED
+  PASS  R-10: POSITION_OPEN → STUCK (bukan terminal, closed_at NULL)
+  ALL TESTS PASSED
+  ```

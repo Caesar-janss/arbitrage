@@ -220,4 +220,13 @@ SELECT l.trade_id, l.mode, l.strategy, l.state, l.canonical_asset,
 FROM rpt.v_trade_ledger l
 WHERE NOT l.is_terminal OR NOT l.is_flat;
 
+-- ---------------------------------------------------------------------
+-- R-10: transisi yang dibutuhkan risk code saat posisi ditahan
+-- (mirror TradeStateMachine.TransitionList; dites oleh TradeStateMachineTests)
+-- ---------------------------------------------------------------------
+INSERT INTO trd.trade_state_transition (from_state, to_state) VALUES
+  ('POSITION_OPEN', 'RESIDUAL'),        -- satu kaki dilikuidasi / ADL saat menahan posisi
+  ('POSITION_OPEN', 'STUCK'),           -- venue tak terjangkau / rekonsiliasi gagal saat menahan posisi
+  ('EXITING',       'POSITION_OPEN');   -- partial reduce (MarginGuard ReducePair) selesai, sisa tetap terbuka
+
 COMMIT;

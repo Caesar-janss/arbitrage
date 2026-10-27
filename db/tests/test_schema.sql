@@ -657,6 +657,26 @@ SELECT pg_temp.fill(10091, '1009-1', 59990, 0.01, 0.329945, 'USDT', 0.329945, '2
 SELECT pg_temp.trans(1009, 'REPAIRED', '2026-10-22 12:00:00.090+00');
 SELECT pg_temp.assert_true('R-02: REPAIRED dengan perp terbuka tetap di v_open_exposure',
        EXISTS (SELECT 1 FROM rpt.v_open_exposure WHERE trade_id = 1009 AND NOT is_flat AND open_perp_qty_base = 0.01));
+
+-- R-10: posisi funding: partial reduce (EXITING → POSITION_OPEN), likuidasi satu kaki (POSITION_OPEN → RESIDUAL),
+--       venue tak terjangkau saat menahan posisi (POSITION_OPEN → STUCK)
+SELECT pg_temp.trade(1010, 1, 'FUNDING_PERP_PERP', 'PEPE', 5, 4, 100000000, 0.000012, 0.000012006, 2.4, 0.5, '2026-10-22 13:00:00+00');
+SELECT pg_temp.trans(1010, 'IN_FLIGHT',     '2026-10-22 13:00:00.002+00');
+SELECT pg_temp.trans(1010, 'POSITION_OPEN', '2026-10-22 13:00:00.050+00');
+SELECT pg_temp.trans(1010, 'EXITING',       '2026-10-22 14:00:00+00', 'MarginGuard ReducePair 40%');
+SELECT pg_temp.trans(1010, 'POSITION_OPEN', '2026-10-22 14:00:00.080+00', 'partial reduce selesai, 60% tetap terbuka');
+SELECT pg_temp.trans(1010, 'RESIDUAL',      '2026-10-22 15:00:00+00', 'short Binance dilikuidasi / ADL');
+SELECT pg_temp.trans(1010, 'REPAIRING',     '2026-10-22 15:00:00.010+00');
+SELECT pg_temp.trans(1010, 'CLOSED',        '2026-10-22 15:00:00.200+00');
+SELECT pg_temp.assert_text('R-10: urutan state 1010 (reduce → likuidasi → tutup)',
+       (SELECT string_agg(to_state, '>' ORDER BY seq) FROM trd.trade_state_log WHERE trade_id = 1010),
+       'CREATED>IN_FLIGHT>POSITION_OPEN>EXITING>POSITION_OPEN>RESIDUAL>REPAIRING>CLOSED');
+SELECT pg_temp.trade(1011, 1, 'FUNDING_SPOT_PERP', 'PEPE', 6, 4, 100000000, 0.000012, 0.000012006, 2.4, 0.5, '2026-10-22 13:00:00+00');
+SELECT pg_temp.trans(1011, 'IN_FLIGHT',     '2026-10-22 13:00:00.002+00');
+SELECT pg_temp.trans(1011, 'POSITION_OPEN', '2026-10-22 13:00:00.050+00');
+SELECT pg_temp.trans(1011, 'STUCK',         '2026-10-22 16:00:00+00', 'venue down saat menahan posisi');
+SELECT pg_temp.assert_true('R-10: POSITION_OPEN → STUCK (bukan terminal, closed_at NULL)',
+       (SELECT state = 'STUCK' AND closed_at IS NULL FROM trd.trade_group WHERE trade_id = 1011));
 ROLLBACK;
 
 -- =====================================================================
