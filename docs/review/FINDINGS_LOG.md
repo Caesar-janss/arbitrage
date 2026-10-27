@@ -8,13 +8,16 @@ bukti dijadikan test xUnit yang gagal sebelum fix (syarat `TEAM_WORKFLOW.md` §5
 
 **Status Tahap 1: REVIEW TERBUKA.** Ditutup hanya jika (1) setiap temuan S1/S2 CONFIRMED punya fix + regression test
 yang tercatat gagal sebelum fix dan lulus sesudahnya (`docs/review/stage1/REGRESSION_LOG.md`), (2) C-01/C-02 sudah
-ditriase, (3) review Gemini masuk dan ditriase, (4) Jansen menyetujui secara eksplisit. Patch v0.3 tidak mengubah status ini.
+ditriase, (3) fix S1 (R-01, R-02) di-review ulang oleh ChatGPT pada paket v0.3, (4) Jansen menyetujui secara eksplisit.
+Patch v0.3 tidak mengubah status ini. (Syarat (3) semula "review Gemini". Gemini keluar dari tim 2026-10-27, lihat
+`TEAM_WORKFLOW.md` §9.)
 
 Progres syarat penutupan (2026-10-27): (1) **terpenuhi** untuk Claude-R (semua S1/S2 + S3/S4 juga); (2) **belum**: isi
-C-01/C-02 belum diterima; (3) **belum**: Gemini; (4) **belum**. Versi untuk ronde review berikutnya: v0.3,
-`make_review_packet.py --version` = `51fbff899cf6`.
+C-01/C-02 belum diterima; (3) **belum**: re-review ChatGPT v0.3; (4) **belum**. Versi untuk ronde review berikutnya: v0.3,
+`make_review_packet.py --version` = `9be7565c2c7f`.
 
-Detail tiap temuan Claude-R: `docs/review/stage1/R_claude-r.md`. ChatGPT: lihat bagian di bawah. Gemini: menunggu.
+Detail tiap temuan Claude-R: `docs/review/stage1/R_claude-r.md`. ChatGPT: lihat bagian di bawah. Gemini: keluar dari tim
+(2026-10-27), tidak ada review.
 
 | ID | Sev | Area | Klaim (ringkas) | Status | Bukti triase | Batch | Fix v0.3 (regression test dulu) |
 |---|---|---|---|---|---|---|---|
@@ -76,7 +79,7 @@ dibandingkan dengan R-xx saat file diterima (jika ternyata berbeda substansi, st
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | Claude-R | 20 | 20 | 0 | 19 | 1 (R-05, data ARM64) | 0 | 0 | 95% (19/20) |
 | ChatGPT | 6 | ≤ 2 | 4 | 0 | 0 | 0 | 2 | — (belum ada yang terputus) |
-| Gemini | — | | | | | | | |
+| Gemini | — | | | | | | | keluar dari tim 2026-10-27, tidak menyerahkan review |
 
 Aturan hitung: "Unik" = tidak tumpang-tindih dengan temuan yang tercatat lebih dulu. DUPLICATE tidak menambah skor
 temuan, tetapi koreksi label (R-01) dicatat di atas sebagai kontribusi review.

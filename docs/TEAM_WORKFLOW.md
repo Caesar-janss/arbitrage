@@ -1,13 +1,13 @@
 # Team Workflow — ArbEngine
 
-> **Draft v0.2 — usulan, final setelah keputusan Jansen** (`Q: … A: …`).
-> Disusun dari tiga proposal (Claude, ChatGPT, Gemini). Peran AI bersifat **sementara** sampai ronde review
-> Tahap 1 selesai dan diukur dengan metrik §8. Proposal yang menunjuk dirinya sendiri sebagai lead bukan bukti.
+> **v0.3 (2026-10-27).** Disusun dari tiga proposal (Claude, ChatGPT, Gemini). **Gemini keluar dari tim** (keputusan
+> Jansen, §9): tidak punya akses repo, relay manual memakan waktu. Peran AI tetap dievaluasi dengan metrik §8.
 
-Tim: **Jansen** (satu-satunya manusia: owner, keputusan, akun/key, ops) · **Claude** · **ChatGPT** · **Gemini** ·
-**Claude-R** (agen Claude terpisah dengan konteks kosong, dijalankan Claude untuk review).
+Tim: **Jansen** (satu-satunya manusia: owner, keputusan, akun/key, ops) · **Claude** (builder) · **ChatGPT** (reviewer
+independen, satu-satunya model di luar keluarga Claude) · **Claude-R** (agen Claude terpisah dengan konteks kosong,
+dijalankan Claude untuk review).
 
-## 0. Lima aturan inti (disepakati ketiga proposal)
+## 0. Lima aturan inti (disepakati ketiga proposal awal)
 1. **Satu pemilik per modul.** Dua anggota tidak menulis file yang sama di tahap yang sama.
 2. **Reviewer tidak commit.** Patch reviewer masuk sebagai *temuan* dan ikut triase.
 3. **Wasit = bukti.** Test yang gagal, hitungan yang bisa diulang, CI GitHub, atau dokumen resmi venue. Bukan voting. Tidak ada anggota yang selalu benar.
@@ -26,23 +26,28 @@ CI GitHub (`.github/workflows/ci.yml`) adalah wasit akhir "test lulus" untuk sem
 ## 2. Peran (usulan awal)
 | Anggota | Tanggung jawab | Diserahkan | Tidak boleh |
 |---|---|---|---|
-| **Jansen** | Keputusan (venue, limit risiko, go/no-go), akun exchange & API key, repo GitHub (`Caesar-janss/arbitrage`), VPS Tokyo, jalankan probe latency / testnet / paper trading, relay paket ke ChatGPT & Gemini | `Q: A:`, merge PR, data lapangan | Menempel key ke AI |
-| **Claude** | Builder modul inti (kode + test + mutation test), triase temuan dengan bukti, docs & `FINDINGS_LOG`, membuat paket review, menjalankan Claude-R | zip/PR + laporan serah-terima (§4) | Menyentuh key, deploy live |
-| **Gemini** | Audit **seluruh repo** (konteks panjang): kontrak C# ↔ SQL ↔ docs, logika quant (wallet trap, likuidasi, fee VIP/BGB, legging), **verifikasi asumsi API venue dengan link dokumen resmi** | temuan + tabel asumsi venue (VERIFIED/CONTRADICTED/UNVERIFIED) | Klaim API tanpa sumber |
-| **ChatGPT** | **Numerik & low-level**: hitung ulang angka test (Python), derivasi rumus, red-team urutan kegagalan, audit fokus file kritis (seqlock, Int128 overflow, race) | temuan + tabel hitung ulang + usulan test adversarial | Mengubah angka tanpa hitungan |
-| **Claude-R** | Review adversarial dengan eksekusi kode, tanpa melihat proses pembuatan | `FINDINGS.md` | Menulis ke repo |
+| **Jansen** | Keputusan (venue, limit risiko, go/no-go), akun exchange & API key, repo GitHub (`Caesar-janss/arbitrage`), VPS Tokyo, jalankan probe latency / testnet / paper trading, relay paket ke ChatGPT | `Q: A:`, merge PR, data lapangan | Menempel key ke AI |
+| **Claude** | Builder modul inti (kode + test + mutation test), triase temuan dengan bukti, docs & `FINDINGS_LOG`, membuat paket review, menjalankan Claude-R. **Mengambil alih tugas Gemini:** verifikasi asumsi API venue dengan link dokumen resmi (tabel VERIFIED/CONTRADICTED/UNVERIFIED, wajib sebelum adapter Tahap 2) | zip/PR + laporan serah-terima (§4) | Menyentuh key, deploy live, klaim API tanpa sumber |
+| **ChatGPT** | **Numerik & low-level**: hitung ulang angka test (Python), derivasi rumus, red-team urutan kegagalan, audit fokus file kritis (seqlock, Int128 overflow, race). **Ditambah:** cek silang tabel asumsi API venue dari Claude, dan **re-review wajib** untuk fix/modul S1 (margin, repair, state machine, gateway order) | temuan + tabel hitung ulang + usulan test adversarial (file `.md`) | Mengubah angka tanpa hitungan |
+| **Claude-R** | Review adversarial dengan eksekusi kode, tanpa melihat proses pembuatan. **Ditambah:** audit konsistensi seluruh repo (C# ↔ SQL ↔ docs), sebelumnya tugas Gemini | `FINDINGS.md` | Menulis ke repo |
+| ~~Gemini~~ | Keluar sejak 2026-10-27 (§9). Tugasnya dipindah ke Claude (verifikasi API venue), Claude-R (audit seluruh repo), dan ChatGPT (cek silang) | – | – |
+
+**Risiko yang diterima:** reviewer di luar keluarga model Claude tinggal satu (ChatGPT). Builder (Claude) dan Claude-R bisa
+punya blind spot yang sama. Mitigasinya: re-review ChatGPT **wajib** untuk S1 sebelum merge, dan CI/test kontrak tetap
+menjadi wasit.
 
 ## 3. Alur satu tahap (paling sedikit copy-paste untuk Jansen)
 ```
 Jansen: keputusan/spek (Q:A:)
   → Claude: build + test → STAGEx doc → paket review (1 file per reviewer, ber-hash versi)
   → paralel, timebox 48 jam:
-       Claude-R (otomatis) │ Gemini (Jansen upload 1 file) │ ChatGPT (Jansen upload 1 file) │ CI GitHub
-  → Jansen kirim balik jawaban Gemini/ChatGPT apa adanya (file .md)
+       Claude-R (otomatis) │ ChatGPT (Jansen upload 1 file) │ CI GitHub
+  → Jansen kirim balik jawaban ChatGPT apa adanya (file .md, isi temuan lengkap; bukan ringkasan instruksi)
   → Claude: triase CONFIRMED/REJECTED/NEEDS-DATA/DUPLICATE → fix + test → FINDINGS_LOG
   → reviewer cek ulang fix S1 → CI hijau → Jansen merge → gate tahap berikutnya
 ```
-Relay Jansen per tahap: **2 upload keluar, 2 file balik.** Spek/prompt tidak perlu dioper bolak-balik antar AI.
+Relay Jansen per tahap: **1 upload keluar, 1 file balik** (sebelumnya 2 + 2 dengan Gemini). Spek/prompt tidak perlu
+dioper bolak-balik antar AI.
 
 ## 4. Serah-terima (wajib di setiap PR/zip — diadopsi dari proposal ChatGPT)
 1. Versi dasar (hash) dan tugas yang dikerjakan.
@@ -51,7 +56,7 @@ Relay Jansen per tahap: **2 upload keluar, 2 file balik.** Spek/prompt tidak per
 4. Masalah terbuka + pekerjaan berikutnya.
 
 ## 5. Temuan & triase
-Format: `docs/review/FINDINGS_TEMPLATE.md` (prefix G/C/R/J; severity S1–S4).
+Format: `docs/review/FINDINGS_TEMPLATE.md` (prefix C/R/J; prefix G tidak dipakai lagi; severity S1–S4).
 
 | Status | Syarat |
 |---|---|
@@ -96,7 +101,10 @@ S1 wajib selesai sebelum tahap berikutnya.
 
 Peran dirotasi berdasarkan angka ini.
 
-## 9. Keputusan terbuka (pemilik: Jansen)
-- Final pembagian peran AI (usulan di atas vs proposal ChatGPT/Gemini).
+## 9. Keputusan (pemilik: Jansen)
+Q: Gemini tetap di tim? A: **Tidak** (2026-10-27): tidak bisa akses repo, relay manual tidak sepadan dengan waktunya.
+Project dikerjakan Claude + ChatGPT (peran di §2).
+
+Terbuka:
 - Pasangan venue spatial (opsi a/b/c, `STAGE1_CORE.md` §5), setelah data probe latency.
 - Mode akun Bitget: UTA atau classic (menentukan WS order entry).
