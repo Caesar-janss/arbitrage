@@ -109,7 +109,7 @@ public readonly struct SpatialQuote
 /// <summary>
 /// Spatial opportunity pricing pipeline (pure, allocation-free):
 ///  1) usable books → 2) Q* merge-walk with haircut/caps/hurdle → 3) snap to common lot (floor),
-///  gross-up buy leg if its fee is charged in base → 4) exact integer VWAP walks + marginal limit prices →
+///  gross-up buy leg if its fee is charged in base → 4) exact integer VWAP walks WITH THE SAME HAIRCUT + marginal limit prices →
 ///  5) venue minimums → 6) exact net edge vs MinProfit.
 /// Staleness, sanity (wallet status), inventory and halts are separate gates (Risk/*), applied by the engine.
 /// </summary>
@@ -158,8 +158,11 @@ public static class SpatialArbPricer
             ? LotNormalizer.GrossUpBuyLots(sellQtyExact, p.BuyFee.Rate, buy)
             : units * ctx.Grid.LotsPerUnitA;
 
-        VwapFill buyFill = VwapWalker.WalkLots(asks, buyLots);
-        VwapFill sellFill = VwapWalker.WalkLots(bids, sellLots);
+        // Same liquidity assumption as Q* (R-03): walk only HaircutPpm of each displayed level. The marginal level of
+        // this walk is the IOC limit, so the IOC can sweep FULL displayed size up to it and still fill the whole leg
+        // when only the haircut fraction is really there; VWAP / edge are priced at that (conservative) depth.
+        VwapFill buyFill = VwapWalker.WalkLots(asks, buyLots, p.HaircutPpm);
+        VwapFill sellFill = VwapWalker.WalkLots(bids, sellLots, p.HaircutPpm);
         if (!buyFill.IsComplete || !sellFill.IsComplete)
         {
             return Reject(RejectReason.RejectThreshold, cross, askTob, bidTob, tobBps);

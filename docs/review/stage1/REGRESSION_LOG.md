@@ -122,3 +122,18 @@ di sandbox; lihat `STAGE1_CORE.md` §7). CI GitHub menjalankan xUnit asli pada c
   PASS  R-10: POSITION_OPEN → STUCK (bukan terminal, closed_at NULL)
   ALL TESTS PASSED
   ```
+
+## R-03 (S2) — haircut dipakai untuk Q* tetapi tidak untuk limit IOC / VWAP / edge
+
+- **Test**: `Regression/R03_HaircutConsistentPricingTests.cs` (4; API lama → merah perilaku), skenario P01.
+- **MERAH**:
+  ```
+  FAIL …BuyLimit_CoversTheLevelsTheOptimizerCounted          Expected: 6000600  Actual: 6000000
+  FAIL …NetEdge_IsComputedAtTheHaircutVwap_NotOverstated     Expected: 0.9179775  Actual: 0.948 (Diff 0.0300225)
+  FAIL …SellSide_HaircutAlsoMovesTheSellLimit                Expected: 6019500  Actual: 6020000
+  TOTAL: 1 passed, 3 failed        (FullLiquidity_IsUnchanged lulus: perilaku tanpa haircut tidak berubah)
+  ```
+- **Patch**: `SpatialArbPricer`: walk VWAP kedua kaki dengan `p.HaircutPpm` yang sama dengan optimizer. Level marginal
+  walk tersebut = limit IOC, sehingga IOC tetap terisi penuh walau hanya fraksi haircut yang benar-benar tersedia;
+  edge dihitung pada VWAP konservatif itu.
+- **HIJAU**: `R03_HaircutConsistentPricingTests 4 passed`; full suite `TOTAL: 178 passed, 0 failed`.
