@@ -137,3 +137,26 @@ di sandbox; lihat `STAGE1_CORE.md` §7). CI GitHub menjalankan xUnit asli pada c
   walk tersebut = limit IOC, sehingga IOC tetap terisi penuh walau hanya fraksi haircut yang benar-benar tersedia;
   edge dihitung pada VWAP konservatif itu.
 - **HIJAU**: `R03_HaircutConsistentPricingTests 4 passed`; full suite `TOTAL: 178 passed, 0 failed`.
+
+## R-04 (S2) — `MarkInvalid`/`MarkResyncing` dari thread lain merusak versi seqlock
+
+- **Test**: `Regression/R04_ExternalBookMarksTests.cs` (4; API lama → merah perilaku), skenario P12/P22.
+- **MERAH (deterministik)**:
+  ```
+  FAIL …ConcurrentExternalMarks_NeverCorruptTheSeqlockVersion   Expected: 2  Actual: 16000002   (thread eksternal masuk section writer)
+  FAIL …InvalidOutranksResync_AndFirstFaultIsKept               Expected: Invalid  Actual: Resyncing (Mark terakhir menang)
+  TOTAL: 2 passed, 2 failed
+  ```
+- **MERAH (probabilistik, storm 2 × 2.000.000 Mark per ronde, 3 run, 1 kena)** — race sungguhan yang ditandai review:
+  ```
+  XunitException: round 1: version 14199383 left ODD by concurrent marks
+  XunitException: 777508 torn reads among 791482 accepted
+  ```
+  Dua run lain tidak memicu race (race nyata, tidak deterministik). Karena itu test di repo memakai assert deterministik
+  (versi tidak boleh berubah oleh thread eksternal) ditambah stress yang wajib tetap 0 torn.
+- **Patch** `OrderBookL2`: Mark* = *request flag* (`Interlocked.CompareExchange`, Invalid > Resync, fault pertama dipertahankan), tidak
+  pernah menulis versi; `TryCopyTo`/`Health`/`Fault` langsung memperlihatkan request; `ApplyDelta` menolak selama request
+  tertunda; `ApplySnapshot` mengonsumsinya (request yang datang setelahnya tetap berlaku). `EndWrite` memakai nilai ganjil
+  milik section itu sendiri (tidak membaca ulang); `BeginWrite` memulihkan paritas bila menemukan versi ganjil
+  (`ParityRepairs`, seharusnya selalu 0).
+- **HIJAU**: `R04_ExternalBookMarksTests 4 passed`; storm 2 × 2.000.000: 3/3 run `4 passed`; full suite `182 passed, 0 failed`.
