@@ -105,6 +105,18 @@ UPDATE ref.setting
  WHERE key = 'dust_quote';
 
 -- ---------------------------------------------------------------------
+-- R-16: ekspektasi disimpan per komponen. exp_net_quote (gate entry) sudah
+-- dikurangi buffer slippage & rebalance amortisasi yang TIDAK PERNAH muncul di
+-- fill → capture ratio terinflasi (1.29 untuk trade sempurna). Basis yang
+-- sebanding dengan realized = exp_cash = exp_net + buffer + rebalance
+-- (= EdgeBreakdown.ExpectedCashQuote). Biaya rebalance riil dibandingkan
+-- terpisah (rpt.v_rebalance_cost_daily vs acct.transfer).
+-- ---------------------------------------------------------------------
+ALTER TABLE trd.trade_group
+    ADD COLUMN exp_slippage_buffer_quote ref.amt NOT NULL DEFAULT 0,
+    ADD COLUMN exp_rebalance_quote       ref.amt NOT NULL DEFAULT 0;
+
+-- ---------------------------------------------------------------------
 -- Ledger: is_flat = (net delta = dust yang diterima engine) DAN tidak ada
 -- posisi perp terbuka (R-02, R-14). Kolom baru di AKHIR (syarat CREATE OR
 -- REPLACE VIEW).
@@ -191,7 +203,8 @@ WITH fx AS (
            b.net_base_delta * COALESCE(b.last_fill_px, 0)                   AS residual_quote,
            b.net_base_delta = COALESCE(b.dust_accepted_base, 0)
              AND b.open_perp_qty_base = 0                                   AS is_flat,
-           COALESCE(b.dust_accepted_base, 0) * COALESCE(b.last_fill_px, 0)  AS dust_accepted_quote
+           COALESCE(b.dust_accepted_base, 0) * COALESCE(b.last_fill_px, 0)  AS dust_accepted_quote,
+           b.exp_net_quote + b.exp_slippage_buffer_quote + b.exp_rebalance_quote AS exp_cash_quote
     FROM base b
 )
 SELECT c.trade_id, c.run_id, c.mode, c.strategy, c.canonical_asset, c.quote_asset,
@@ -213,7 +226,7 @@ SELECT c.trade_id, c.run_id, c.mode, c.strategy, c.canonical_asset, c.quote_asse
        CASE WHEN c.is_terminal AND c.is_flat
             THEN c.cash_flow_quote + c.residual_quote END                      AS realized_pnl_quote,
        CASE WHEN c.is_terminal AND c.is_flat AND c.state <> 'MISSED'
-            THEN c.exp_net_quote - (c.cash_flow_quote + c.residual_quote) END  AS shortfall_quote,
+            THEN c.exp_cash_quote - (c.cash_flow_quote + c.residual_quote) END AS shortfall_quote,  -- R-16: basis exp_cash
        -- legging
        c.had_residual, c.had_stuck, c.first_residual_at, c.flat_after_repair_at,
        CASE WHEN c.had_residual AND c.flat_after_repair_at IS NOT NULL
@@ -224,8 +237,64 @@ SELECT c.trade_id, c.run_id, c.mode, c.strategy, c.canonical_asset, c.quote_asse
        c.open_perp_qty_base,
        c.dust_accepted_base,
        c.dust_accepted_quote,
-       abs(c.dust_accepted_quote) > ref.fn_setting('dust_quote')              AS dust_over_limit
+       abs(c.dust_accepted_quote) > ref.fn_setting('dust_quote')              AS dust_over_limit,
+       c.exp_slippage_buffer_quote,
+       c.exp_rebalance_quote,
+       c.exp_cash_quote,
+       CASE WHEN c.is_terminal AND c.is_flat AND c.state <> 'MISSED'
+            THEN round((c.cash_flow_quote + c.residual_quote) / NULLIF(c.exp_cash_quote, 0), 6) END AS capture_ratio
 FROM calc c;
+
+-- R-16: capture ratio harian pada basis yang sama (kolom lama, arti dikoreksi) + kolom baru di akhir
+CREATE OR REPLACE VIEW rpt.v_daily_pnl AS
+SELECT (l.closed_at AT TIME ZONE 'UTC')::date                                   AS day_utc,
+       l.mode,
+       l.strategy,
+       count(*)                                                                AS n_closed,
+       count(*) FILTER (WHERE l.state = 'MISSED')                              AS n_missed,
+       count(*) FILTER (WHERE l.had_residual)                                  AS n_legged,
+       count(*) FILTER (WHERE l.realized_pnl_quote > 0)                        AS n_win,
+       count(*) FILTER (WHERE l.realized_pnl_quote < 0)                        AS n_loss,
+       round(count(*) FILTER (WHERE l.realized_pnl_quote > 0)::numeric
+             / NULLIF(count(*) FILTER (WHERE l.state <> 'MISSED'), 0), 4)      AS win_rate,
+       sum(l.realized_pnl_quote)                                               AS realized_pnl_quote,
+       sum(l.fees_total_quote)                                                 AS fees_quote,
+       sum(l.funding_quote)                                                    AS funding_quote,
+       sum(l.exp_net_quote) FILTER (WHERE l.state <> 'MISSED')                 AS expected_pnl_filled,
+       sum(l.exp_net_quote)                                                    AS expected_pnl_all,
+       round(sum(l.realized_pnl_quote) FILTER (WHERE l.state <> 'MISSED')
+             / NULLIF(sum(l.exp_cash_quote) FILTER (WHERE l.state <> 'MISSED'), 0), 4) AS capture_ratio_filled,
+       round(sum(l.realized_pnl_quote) / NULLIF(sum(l.exp_cash_quote), 0), 4)  AS capture_ratio_all,
+       round(avg(l.buy_slippage_bps), 3)                                       AS avg_buy_slippage_bps,
+       round(avg(l.sell_slippage_bps), 3)                                      AS avg_sell_slippage_bps,
+       min(l.realized_pnl_quote)                                               AS worst_trade_quote,
+       count(*) FILTER (WHERE l.realized_pnl_quote IS NULL)                    AS n_unrealized_terminal,
+       -- v0.3
+       sum(l.exp_cash_quote) FILTER (WHERE l.state <> 'MISSED')                AS expected_cash_filled,
+       sum(l.exp_rebalance_quote) FILTER (WHERE l.state <> 'MISSED')           AS expected_rebalance_quote
+FROM rpt.v_trade_ledger l
+WHERE l.is_terminal
+GROUP BY 1, 2, 3;
+
+-- R-16: biaya rebalance — amortisasi yang diasumsikan trade vs fee transfer riil per hari (kalibrasi model)
+CREATE VIEW rpt.v_rebalance_cost_daily AS
+WITH e AS (
+    SELECT (l.closed_at AT TIME ZONE 'UTC')::date AS day_utc, sum(l.exp_rebalance_quote) AS expected_quote
+    FROM rpt.v_trade_ledger l
+    WHERE l.is_terminal AND l.mode = 'LIVE' AND l.state <> 'MISSED'
+    GROUP BY 1
+), r AS (
+    SELECT (t.completed_at AT TIME ZONE 'UTC')::date AS day_utc, sum(t.fee_quote) AS realized_quote, count(*) AS n_transfers
+    FROM acct.transfer t
+    WHERE t.status = 'COMPLETED'
+    GROUP BY 1
+)
+SELECT COALESCE(e.day_utc, r.day_utc)          AS day_utc,
+       COALESCE(e.expected_quote, 0)          AS expected_rebalance_quote,
+       COALESCE(r.realized_quote, 0)          AS realized_transfer_fee_quote,
+       COALESCE(r.n_transfers, 0)             AS n_transfers,
+       COALESCE(r.realized_quote, 0) - COALESCE(e.expected_quote, 0) AS model_error_quote
+FROM e FULL JOIN r ON r.day_utc = e.day_utc;
 
 CREATE OR REPLACE VIEW rpt.v_open_exposure AS
 SELECT l.trade_id, l.mode, l.strategy, l.state, l.canonical_asset,

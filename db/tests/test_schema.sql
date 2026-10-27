@@ -219,6 +219,8 @@ $$;
 -- ---------------------------------------------------------------------
 SELECT pg_temp.trade(1001, 1, 'SPATIAL', 'BTC', 1, 2, 0.01, 60000, 60150, 1.0515, 0.3485, '2026-10-22 01:00:00+00');
 UPDATE trd.trade_group SET opportunity_id = 501, opportunity_at = '2026-10-22 01:00:00+00' WHERE trade_id = 1001;
+-- R-16: komponen ekspektasi disimpan terpisah (= opp 501: buffer slippage 0.08, rebalance amortisasi 0.02)
+UPDATE trd.trade_group SET exp_slippage_buffer_quote = 0.08, exp_rebalance_quote = 0.02 WHERE trade_id = 1001;
 SELECT pg_temp.ord(10011, 1001, 'ENTRY_BUY',  1, 'BUY',  60010, 0.01, '2026-10-22 01:00:00.001+00');
 SELECT pg_temp.ord(10012, 1001, 'ENTRY_SELL', 2, 'SELL', 60140, 0.01, '2026-10-22 01:00:00.001+00');
 SELECT pg_temp.trans(1001, 'IN_FLIGHT', '2026-10-22 01:00:00.002+00');
@@ -425,6 +427,9 @@ SELECT pg_temp.assert_true('STUCK bukan terminal → closed_at NULL',
 \echo '--- PnL ledger ---'
 SELECT pg_temp.assert_eq('1001 realized',  (SELECT realized_pnl_quote FROM rpt.v_trade_ledger WHERE trade_id = 1001), 0.4485);
 SELECT pg_temp.assert_eq('1001 entry buy VWAP dari 2 fill', (SELECT entry_buy_vwap_px FROM rpt.v_trade_ledger WHERE trade_id = 1001), 60000);
+SELECT pg_temp.assert_eq('R-16: 1001 exp_cash = exp_net + buffer slippage + rebalance', (SELECT exp_cash_quote FROM rpt.v_trade_ledger WHERE trade_id = 1001), 0.4485);
+SELECT pg_temp.assert_eq('R-16: 1001 capture ratio = 1 (trade sempurna, basis sama; v0.2: 1.29)', (SELECT capture_ratio FROM rpt.v_trade_ledger WHERE trade_id = 1001), 1);
+SELECT pg_temp.assert_eq('R-16: 1001 shortfall = 0', (SELECT shortfall_quote FROM rpt.v_trade_ledger WHERE trade_id = 1001), 0);
 SELECT pg_temp.assert_eq('1002 realized (unwind)', (SELECT realized_pnl_quote FROM rpt.v_trade_ledger WHERE trade_id = 1002), -1.4988003);
 SELECT pg_temp.assert_eq('1002 net_base_delta = 0 (fee base ikut dihitung)',
        (SELECT net_base_delta FROM rpt.v_trade_ledger WHERE trade_id = 1002), 0);
@@ -450,8 +455,11 @@ SELECT pg_temp.assert_eq('daily LIVE SPATIAL realized',
        (SELECT realized_pnl_quote FROM rpt.v_daily_pnl WHERE day_utc = '2026-10-22' AND mode = 'LIVE' AND strategy = 'SPATIAL'), -1.6561053);
 SELECT pg_temp.assert_eq('daily LIVE SPATIAL win_rate (missed dikecualikan)',
        (SELECT win_rate FROM rpt.v_daily_pnl WHERE day_utc = '2026-10-22' AND mode = 'LIVE' AND strategy = 'SPATIAL'), 0.25);
+-- R-16: basis expected = exp_cash (v0.2: exp_net → −3.0823)
 SELECT pg_temp.assert_eq('daily LIVE SPATIAL capture_ratio_filled',
-       (SELECT capture_ratio_filled FROM rpt.v_daily_pnl WHERE day_utc = '2026-10-22' AND mode = 'LIVE' AND strategy = 'SPATIAL'), -3.0823, 0.00005);
+       (SELECT capture_ratio_filled FROM rpt.v_daily_pnl WHERE day_utc = '2026-10-22' AND mode = 'LIVE' AND strategy = 'SPATIAL'), -2.5986, 0.00005);
+SELECT pg_temp.assert_eq('R-16: daily expected cash (filled) = Σ exp_cash',
+       (SELECT expected_cash_filled FROM rpt.v_daily_pnl WHERE day_utc = '2026-10-22' AND mode = 'LIVE' AND strategy = 'SPATIAL'), 0.6373);
 SELECT pg_temp.assert_eq('funnel: REJECT_STALE terhitung',
        (SELECT n FROM rpt.v_opportunity_funnel WHERE day_utc = '2026-10-22' AND decision = 'REJECT_STALE'), 1);
 SELECT pg_temp.assert_eq('funnel: ilusi likuiditas opp 501 (bps)',
@@ -720,6 +728,13 @@ SELECT pg_temp.assert_eq('R-15: reject tanpa VWAP tersimpan (near-miss + stale)'
        (SELECT count(*) FROM trd.opportunity WHERE opportunity_id IN (601, 602)), 2);
 SELECT pg_temp.assert_true('R-15: funnel tetap terhitung dengan kolom NULL',
        (SELECT n >= 1 FROM rpt.v_opportunity_funnel WHERE day_utc = '2026-10-22' AND decision = 'REJECT_STALE'));
+-- R-16: biaya rebalance riil (acct.transfer) vs amortisasi yang diasumsikan trade, per hari
+INSERT INTO acct.transfer (asset_code, from_exchange, to_exchange, network, amount, fee_amount, fee_quote, status, requested_at, completed_at)
+VALUES ('USDT', 'BYBIT', 'BINANCE', 'TRC20', 500, 1.5, 1.5, 'COMPLETED', '2026-10-22 18:00+00', '2026-10-22 18:05+00');
+SELECT pg_temp.assert_true('R-16: v_rebalance_cost_daily membandingkan ekspektasi (0.02) vs riil (1.5)',
+       (SELECT expected_rebalance_quote = 0.02 AND realized_transfer_fee_quote = 1.5 AND model_error_quote = 1.48
+          FROM rpt.v_rebalance_cost_daily WHERE day_utc = '2026-10-22'));
+
 SELECT pg_temp.expect_error_like('R-15: EXECUTE tanpa VWAP ditolak',
   $q$INSERT INTO trd.opportunity (opportunity_id, detected_at, run_id, strategy, canonical_asset,
       buy_instrument_id, sell_instrument_id, buy_book_age_us, sell_book_age_us, decision)

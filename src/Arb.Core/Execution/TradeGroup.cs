@@ -55,7 +55,11 @@ public sealed class TradeGroup
     /// <summary>Signed canonical base exposure: + long, − short. Zero = flat (delta-neutral).</summary>
     public decimal NetBaseDelta => BoughtCanon - SoldCanon - BaseFeeCanon;
 
-    public decimal CashFlowQuote => SellNotional - BuyNotional - NonBaseFeesQuote;
+    /// <summary>Σ funding payments of the trade's perp legs (+ received, − paid), like trd.funding_payment.</summary>
+    public decimal FundingQuote { get; private set; }
+
+    /// <summary>Same model as rpt.v_trade_ledger.cash_flow_quote: notional flows − non-base fees + funding (R-16).</summary>
+    public decimal CashFlowQuote => SellNotional - BuyNotional - NonBaseFeesQuote + FundingQuote;
 
     /// <summary>Signed residual written off as untradeable dust (0 = none). Persist as trd.trade_group.dust_accepted_base.</summary>
     public decimal DustAcceptedCanon { get; private set; }
@@ -90,6 +94,7 @@ public sealed class TradeGroup
         SellNotional = 0m;
         NonBaseFeesQuote = 0m;
         DustAcceptedCanon = 0m;
+        FundingQuote = 0m;
         _perpCount = 0;
         Array.Clear(_perpNet);
     }
@@ -173,6 +178,9 @@ public sealed class TradeGroup
             NonBaseFeesQuote += feeQuoteValue;
         }
     }
+
+    /// <summary>One funding settlement on a perp leg (venue amount: + received, − paid).</summary>
+    public void ApplyFunding(decimal amountQuote) => FundingQuote += amountQuote;
 
     /// <summary>
     /// State transition with exposure rules on top of the transition table: no terminal flat state while a perp

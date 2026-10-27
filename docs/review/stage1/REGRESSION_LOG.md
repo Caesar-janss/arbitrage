@@ -394,3 +394,22 @@ jadi datanya dikumpulkan di CI: job manual `seqlock-arm64` (`df8d55e`) = listing
 - **HIJAU**: `R15_OpportunityRowContractTests 3 passed`, `R15_RejectQuoteFieldsTests 2 passed`; full suite `237 passed, 0 failed`;
   DB `PASS R-15: reject tanpa VWAP tersimpan … = 2`, `funnel tetap terhitung`, `EXECUTE tanpa VWAP ditolak → 23514
   (opportunity_execute_complete)`, `ALL TESTS PASSED`.
+
+## R-16 (S3) — basis expected ≠ realized → capture ratio terinflasi; TradeGroup tanpa funding
+
+- **Test C#**: `Regression/R16_ExpectedVsRealizedBasisTests.cs` (2). **Test SQL**: trade 1001 diberi komponen ekspektasi
+  (buffer slippage 0,08 + rebalance 0,02 = opp 501), capture per trade & harian, `v_rebalance_cost_daily`.
+- **MERAH (compile, C#)**: `'EdgeBreakdown' does not contain a definition for 'ExpectedCashQuote'`, `'TradeGroup' does not contain a
+  definition for 'ApplyFunding'` / `'FundingQuote'`.
+- **MERAH (SQL)**: `ERROR: column "exp_slippage_buffer_quote" of relation "trade_group" does not exist`. Bukti perilaku v0.2:
+  capture 1001 = realized 0,4485 / exp_net 0,3485 = **1,29** untuk trade yang terisi persis di VWAP model; capture harian
+  −3,0823.
+- **Patch**:
+  - C#: `EdgeBreakdown.ExpectedCashQuote` = net + buffer slippage + rebalance (basis yang direalisasikan fill; `NetQuote` tetap
+    gate entry); `TradeGroup.ApplyFunding` / `FundingQuote`, `CashFlowQuote` = model yang sama dengan `v_trade_ledger`.
+  - SQL (`V007`): `trade_group.exp_slippage_buffer_quote`, `exp_rebalance_quote`; ledger `exp_cash_quote`, `capture_ratio`;
+    `shortfall_quote` dan `v_daily_pnl.capture_ratio_*` memakai exp_cash (+ `expected_cash_filled`, `expected_rebalance_quote`);
+    view baru `rpt.v_rebalance_cost_daily` membandingkan rebalance yang diasumsikan vs fee `acct.transfer` riil.
+- **HIJAU**: `R16_ExpectedVsRealizedBasisTests 2 passed` (cash TradeGroup = ExpectedCashQuote; 1006 dengan funding = −1,951285
+  = DB); full suite `239 passed, 0 failed`; DB `capture ratio = 1 (v0.2: 1.29)`, `shortfall = 0`, capture harian **−2,5986**
+  (sengaja berubah dari −3,0823 karena basisnya dikoreksi), `v_rebalance_cost_daily 0.02 vs 1.5`, `ALL TESTS PASSED`.
