@@ -37,6 +37,7 @@ public sealed class OrderBookL2
     private int _requested; // 0 | RequestResync | RequestInvalid | (byte)fault — any thread raises, writer consumes
     private long _parityRepairs;
     private BookStamp _stamp;
+    private int _gridGeneration;
     private BookHealth _health;
     private BookFault _fault;
     private bool _truncated;
@@ -89,8 +90,20 @@ public sealed class OrderBookL2
 
     public BookStamp Stamp => _stamp;
 
-    /// <summary>Replace the whole book. Inputs best-first (fast path); unsorted input is accepted (slow path).</summary>
-    public void ApplySnapshot(ReadOnlySpan<PriceLevel> bidsBestFirst, ReadOnlySpan<PriceLevel> asksBestFirst, in BookStamp stamp)
+    /// <summary>Instrument grid generation the current levels were parsed with (set by <see cref="ApplySnapshot(ReadOnlySpan{PriceLevel}, ReadOnlySpan{PriceLevel}, in BookStamp, int)"/>).</summary>
+    public int GridGeneration => _gridGeneration;
+
+    /// <summary>Replace the whole book, parsed with grid generation 0 (see the overload).</summary>
+    public void ApplySnapshot(ReadOnlySpan<PriceLevel> bidsBestFirst, ReadOnlySpan<PriceLevel> asksBestFirst, in BookStamp stamp) =>
+        ApplySnapshot(bidsBestFirst, asksBestFirst, stamp, 0);
+
+    /// <summary>
+    /// Replace the whole book. Inputs best-first (fast path); unsorted input is accepted (slow path).
+    /// <paramref name="gridGeneration"/> = <see cref="Instruments.InstrumentSpec.GridGeneration"/> of the spec used to parse
+    /// these ticks/lots; deltas inherit it. After a tick/step change the synchronizer must re-snapshot with the new
+    /// generation — until then the pricer refuses the book (R-08).
+    /// </summary>
+    public void ApplySnapshot(ReadOnlySpan<PriceLevel> bidsBestFirst, ReadOnlySpan<PriceLevel> asksBestFirst, in BookStamp stamp, int gridGeneration)
     {
         Interlocked.Exchange(ref _requested, 0); // requests raised BEFORE this snapshot are satisfied by it
         long v = BeginWrite();
@@ -102,6 +115,7 @@ public sealed class OrderBookL2
             _fault = BookFault.None;
             _health = BookHealth.Synced;
             _stamp = stamp;
+            _gridGeneration = gridGeneration;
             BookFault f = LoadSide(_bids, ref _bidCount, bidsBestFirst, 1);
             if (f == BookFault.None)
             {
@@ -212,6 +226,7 @@ public sealed class OrderBookL2
             }
 
             BookStamp stamp = _stamp;
+            int generation = _gridGeneration;
             BookHealth health = _health;
             BookFault fault = _fault;
             bool truncated = _truncated;
@@ -221,7 +236,7 @@ public sealed class OrderBookL2
             if (v1 == v2)
             {
                 health = Effective(health, fault, Volatile.Read(ref _requested), out fault);
-                view.Commit(Instrument, nb, na, stamp, health, fault, v1, truncated);
+                view.Commit(Instrument, nb, na, stamp, health, fault, v1, truncated, generation);
                 return true;
             }
 

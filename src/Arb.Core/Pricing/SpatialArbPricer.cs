@@ -132,6 +132,11 @@ public static class SpatialArbPricer
             return new SpatialQuote { Decision = RejectReason.RejectStale };
         }
 
+        if (buyBook.GridGeneration != buy.GridGeneration || sellBook.GridGeneration != sell.GridGeneration)
+        {
+            return new SpatialQuote { Decision = RejectReason.RejectStale }; // ticks/lots parsed with another grid (R-08)
+        }
+
         ReadOnlySpan<PriceLevel> asks = buyBook.Asks;
         ReadOnlySpan<PriceLevel> bids = sellBook.Bids;
         double askTob = buy.CanonicalPrice(asks[0].PxTicks);

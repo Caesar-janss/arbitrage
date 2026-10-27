@@ -179,3 +179,21 @@ di sandbox; lihat `STAGE1_CORE.md` §7). CI GitHub menjalankan xUnit asli pada c
   `ClockUncertain`; semua perbandingan ditulis NaN-safe (`!(x <= limit)`). `FreshnessLimits.From(limits)` = batas
   spatial (paling ketat); `From(limits, strategy)` eksplisit. `RiskLimits.Validate` mengecek konsistensi batas baru.
 - **HIJAU**: `R07_StaleGuardBehaviourTests 3 passed`, `R07_StaleGuardLimitsTests 4 passed`; full suite `189 passed, 0 failed`.
+
+## R-08 (S2) — `Replace` mengganti tick/step dengan key sama → book lama dibaca dengan grid baru
+
+- **Test**: `Regression/R08_SpecGridChangeBehaviourTests.cs` (3, API lama), `Regression/R08_GridGenerationTests.cs` (3, API baru);
+  skenario P15/P19.
+- **MERAH (perilaku)**:
+  ```
+  FAIL …StepChange_BookParsedWithOldStep_IsNotPriced   Expected: RejectStale  Actual: Execute   (beli 0,1 BTC vs depth riil 0,010)
+  FAIL …TickChange_BookParsedWithOldTick_IsNotPriced   Expected: RejectStale  Actual: Execute   (bid terbaca 601.500)
+  TOTAL: 1 passed, 2 failed        (StatusOnlyChange_KeepsBooksUsable lulus: perubahan non-grid tidak terdampak)
+  ```
+- **MERAH (compile)**: `'InstrumentSpec' does not contain a definition for 'GridGeneration'`, `'BookView' does not contain a
+  definition for 'GridGeneration'`.
+- **Patch**: `InstrumentSpec.GridGeneration`; `Replace` menaikkannya hanya bila tick/step berubah;
+  `OrderBookL2.ApplySnapshot(…, gridGeneration)` mencapnya ke book (delta mewarisi), `TryCopyTo`/`BookView` membawanya;
+  `SpatialArbPricer` → `RejectStale` dan `RepairPlanner` melewati kandidat bila generasi book ≠ generasi spec (fail-closed sampai
+  re-snapshot).
+- **HIJAU**: `R08_GridGenerationTests 3 passed`, `R08_SpecGridChangeBehaviourTests 3 passed`; full suite `195 passed, 0 failed`.

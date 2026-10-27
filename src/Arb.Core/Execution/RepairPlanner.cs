@@ -149,7 +149,8 @@ public static class RepairPlanner
         for (int k = 0; k < candidates.Length; k++)
         {
             ref readonly RepairCandidate c = ref candidates[k];
-            if (!c.Available || c.Spec is null || c.Book is null || !c.Book.IsUsable || c.Book.Instrument != c.Spec.Key)
+            if (!c.Available || c.Spec is null || c.Book is null || !c.Book.IsUsable || c.Book.Instrument != c.Spec.Key
+                || c.Book.GridGeneration != c.Spec.GridGeneration)
             {
                 continue;
             }

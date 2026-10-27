@@ -37,9 +37,15 @@ public sealed class InstrumentSpec
         decimal minNotional,
         decimal baseMultiplier,
         int nominalFundingIntervalHours,
-        InstrumentStatus status)
+        InstrumentStatus status,
+        int gridGeneration = 0)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(venueSymbol);
+        if (gridGeneration < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(gridGeneration), gridGeneration, "must be >= 0");
+        }
+
         if (!key.IsValid)
         {
             throw new ArgumentException("invalid instrument key", nameof(key));
@@ -86,6 +92,7 @@ public sealed class InstrumentSpec
         MinNotional = minNotional;
         MinNotionalD = (double)minNotional;
         NominalFundingIntervalHours = nominalFundingIntervalHours;
+        GridGeneration = gridGeneration;
 
         CanonPxPerTick = (double)(tickSize / baseMultiplier);
         CanonQtyPerLot = (double)(stepSize * baseMultiplier);
@@ -126,6 +133,12 @@ public sealed class InstrumentSpec
 
     /// <summary>Configured/listed interval. The LIVE interval can change dynamically (Bybit 8/4/2/1h) and is passed to funding math separately.</summary>
     public int NominalFundingIntervalHours { get; }
+
+    /// <summary>
+    /// Incremented whenever tick or step changes under the same key (R-08). Books carry the generation of the grid
+    /// their ticks/lots were parsed with; pricer and repair planner refuse a book from another generation.
+    /// </summary>
+    public int GridGeneration { get; }
 
     public double CanonPxPerTick { get; }
 

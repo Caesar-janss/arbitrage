@@ -160,7 +160,11 @@ public sealed class InstrumentRegistryBuilder
         return key;
     }
 
-    /// <summary>Replace metadata of an existing instrument (same key/index), e.g. status → Halted or new tick size.</summary>
+    /// <summary>
+    /// Replace metadata of an existing instrument (same key/index), e.g. status → Halted or new tick size.
+    /// A tick or step change bumps <see cref="InstrumentSpec.GridGeneration"/>: books parsed with the old grid become
+    /// unpriceable until re-snapshotted with the new generation (fail-closed, R-08).
+    /// </summary>
     public void Replace(
         InstrumentKey key,
         decimal tickSize,
@@ -187,7 +191,8 @@ public sealed class InstrumentRegistryBuilder
             minNotional,
             old.BaseMultiplier,
             old.NominalFundingIntervalHours,
-            status);
+            status,
+            tickSize != old.Tick.Value || stepSize != old.Step.Value ? old.GridGeneration + 1 : old.GridGeneration);
     }
 
     public InstrumentRegistry Build() => new(_assets, _specs.ToArray());
