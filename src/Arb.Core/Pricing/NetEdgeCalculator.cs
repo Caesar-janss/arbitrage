@@ -84,6 +84,32 @@ public readonly struct EdgeBreakdown
     public double NetEdgeBps { get; init; }
 
     public double TotalFeeQuote => BuyFeeQuote + SellFeeQuote;
+
+    /// <summary>
+    /// Modelled cash PnL at the modelled VWAPs (fees + residual value, WITHOUT the slippage buffer and the amortized
+    /// rebalance cost). This is what fills realize when the model is exact → the denominator of the capture ratio (R-16).
+    /// NetQuote stays the (more conservative) entry gate. Persist SlippageQuote / RebalanceQuote separately.
+    /// </summary>
+    public double ExpectedCashQuote => NetQuote + SlippageQuote + RebalanceQuote;
+
+    /// <summary>Placeholder for quotes rejected before pricing: every amount NaN (persisted as NULL, R-15).</summary>
+    public static EdgeBreakdown NotComputed { get; } = new()
+    {
+        BuyQty = double.NaN,
+        SellQty = double.NaN,
+        BuyNotional = double.NaN,
+        SellNotional = double.NaN,
+        GrossQuote = double.NaN,
+        BuyFeeQuote = double.NaN,
+        SellFeeQuote = double.NaN,
+        SlippageQuote = double.NaN,
+        RebalanceQuote = double.NaN,
+        ResidualBase = double.NaN,
+        ResidualValueQuote = double.NaN,
+        NetQuote = double.NaN,
+        GrossEdgeBps = double.NaN,
+        NetEdgeBps = double.NaN,
+    };
 }
 
 /// <summary>

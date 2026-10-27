@@ -160,8 +160,14 @@ public static class VwapWalker
     private static bool WithinLimit(long px, long limit, Side takerSide) =>
         takerSide == Side.Buy ? px <= limit : px >= limit;
 
+    private const long MaxQtyForLongHaircut = long.MaxValue / FullLiquidityPpm; // ≈ 9.2e12 lots
+
+    // Since R-03 the exact walks run WITH the haircut on every evaluation: keep it on 64-bit arithmetic (Int128
+    // division is several times slower); Int128 only for absurd level sizes. Identical result (floor).
     private static long Available(long qty, int haircutPpm) =>
-        haircutPpm == FullLiquidityPpm ? qty : (long)((Int128)qty * haircutPpm / FullLiquidityPpm);
+        haircutPpm == FullLiquidityPpm ? qty
+        : qty <= MaxQtyForLongHaircut ? qty * haircutPpm / FullLiquidityPpm
+        : (long)((Int128)qty * haircutPpm / FullLiquidityPpm);
 
     private static void ValidateHaircut(int haircutPpm)
     {

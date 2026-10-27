@@ -17,6 +17,12 @@ namespace Arb.Core.MarketData;
 ///
 /// Sequence-number continuity / checksum validation is venue-specific and lives in the synchronizer
 /// (Venues.Common); it calls <see cref="MarkInvalid"/> on a gap and <see cref="ApplySnapshot"/> to recover.
+///
+/// <see cref="MarkInvalid"/> / <see cref="MarkResyncing"/> may be called from ANY thread (watchdog, timer, operator):
+/// they only raise a request flag and never enter the writer's seqlock section (R-04: concurrent writers lost version
+/// increments and could leave the version permanently odd-inverted). Readers see a pending request immediately
+/// (<see cref="TryCopyTo"/> reports Invalid/Resyncing); the writer refuses deltas while one is pending, and
+/// <see cref="ApplySnapshot"/> consumes it. A request raised after the snapshot started survives (conservative).
 /// </summary>
 public sealed class OrderBookL2
 {
@@ -24,8 +30,14 @@ public sealed class OrderBookL2
     private readonly PriceLevel[] _asks;
     private int _bidCount;
     private int _askCount;
+    private const int RequestResync = 1 << 8;
+    private const int RequestInvalid = 2 << 8;
+
     private long _version;
+    private int _requested; // 0 | RequestResync | RequestInvalid | (byte)fault — any thread raises, writer consumes
+    private long _parityRepairs;
     private BookStamp _stamp;
+    private int _gridGeneration;
     private BookHealth _health;
     private BookFault _fault;
     private bool _truncated;
@@ -54,10 +66,20 @@ public sealed class OrderBookL2
 
     public long Version => Volatile.Read(ref _version);
 
-    /// <summary>Writer-thread view of health (monitoring may read it racily).</summary>
-    public BookHealth Health => _health;
+    /// <summary>Health including pending external requests (monitoring may read it racily).</summary>
+    public BookHealth Health => Effective(_health, _fault, Volatile.Read(ref _requested), out _);
 
-    public BookFault Fault => _fault;
+    public BookFault Fault
+    {
+        get
+        {
+            Effective(_health, _fault, Volatile.Read(ref _requested), out BookFault f);
+            return f;
+        }
+    }
+
+    /// <summary>Times the writer found the version already odd on entry (a second writer existed). Should stay 0.</summary>
+    public long ParityRepairs => Interlocked.Read(ref _parityRepairs);
 
     /// <summary>True if levels were dropped because the side reached capacity (only far-from-touch depth is lost).</summary>
     public bool IsTruncated => _truncated;
@@ -68,10 +90,23 @@ public sealed class OrderBookL2
 
     public BookStamp Stamp => _stamp;
 
-    /// <summary>Replace the whole book. Inputs best-first (fast path); unsorted input is accepted (slow path).</summary>
-    public void ApplySnapshot(ReadOnlySpan<PriceLevel> bidsBestFirst, ReadOnlySpan<PriceLevel> asksBestFirst, in BookStamp stamp)
+    /// <summary>Instrument grid generation the current levels were parsed with (set by <see cref="ApplySnapshot(ReadOnlySpan{PriceLevel}, ReadOnlySpan{PriceLevel}, in BookStamp, int)"/>).</summary>
+    public int GridGeneration => _gridGeneration;
+
+    /// <summary>Replace the whole book, parsed with grid generation 0 (see the overload).</summary>
+    public void ApplySnapshot(ReadOnlySpan<PriceLevel> bidsBestFirst, ReadOnlySpan<PriceLevel> asksBestFirst, in BookStamp stamp) =>
+        ApplySnapshot(bidsBestFirst, asksBestFirst, stamp, 0);
+
+    /// <summary>
+    /// Replace the whole book. Inputs best-first (fast path); unsorted input is accepted (slow path).
+    /// <paramref name="gridGeneration"/> = <see cref="Instruments.InstrumentSpec.GridGeneration"/> of the spec used to parse
+    /// these ticks/lots; deltas inherit it. After a tick/step change the synchronizer must re-snapshot with the new
+    /// generation — until then the pricer refuses the book (R-08).
+    /// </summary>
+    public void ApplySnapshot(ReadOnlySpan<PriceLevel> bidsBestFirst, ReadOnlySpan<PriceLevel> asksBestFirst, in BookStamp stamp, int gridGeneration)
     {
-        BeginWrite();
+        Interlocked.Exchange(ref _requested, 0); // requests raised BEFORE this snapshot are satisfied by it
+        long v = BeginWrite();
         try
         {
             _bidCount = 0;
@@ -80,6 +115,7 @@ public sealed class OrderBookL2
             _fault = BookFault.None;
             _health = BookHealth.Synced;
             _stamp = stamp;
+            _gridGeneration = gridGeneration;
             BookFault f = LoadSide(_bids, ref _bidCount, bidsBestFirst, 1);
             if (f == BookFault.None)
             {
@@ -96,7 +132,7 @@ public sealed class OrderBookL2
         }
         finally
         {
-            EndWrite();
+            EndWrite(v);
         }
     }
 
@@ -107,12 +143,12 @@ public sealed class OrderBookL2
     /// </summary>
     public bool ApplyDelta(ReadOnlySpan<PriceLevel> bidUpdates, ReadOnlySpan<PriceLevel> askUpdates, in BookStamp stamp)
     {
-        if (_health != BookHealth.Synced)
+        if (_health != BookHealth.Synced || Volatile.Read(ref _requested) != 0)
         {
             return false;
         }
 
-        BeginWrite();
+        long v = BeginWrite();
         try
         {
             for (int i = 0; i < bidUpdates.Length; i++)
@@ -141,24 +177,16 @@ public sealed class OrderBookL2
         }
         finally
         {
-            EndWrite();
+            EndWrite(v);
         }
     }
 
-    public void MarkInvalid(BookFault fault)
-    {
-        BeginWrite();
-        SetFault(fault == BookFault.None ? BookFault.Manual : fault);
-        EndWrite();
-    }
+    /// <summary>ANY thread. Book unusable until <see cref="ApplySnapshot"/>; Invalid outranks Resyncing, first fault kept.</summary>
+    public void MarkInvalid(BookFault fault) =>
+        Raise(RequestInvalid | (byte)(fault == BookFault.None ? BookFault.Manual : fault));
 
-    /// <summary>Snapshot requested; contents retained but unusable until <see cref="ApplySnapshot"/>.</summary>
-    public void MarkResyncing()
-    {
-        BeginWrite();
-        _health = BookHealth.Resyncing;
-        EndWrite();
-    }
+    /// <summary>ANY thread. Snapshot requested; contents retained but unusable until <see cref="ApplySnapshot"/>.</summary>
+    public void MarkResyncing() => Raise(RequestResync);
 
     /// <summary>
     /// Lock-free consistent copy of the top <paramref name="depth"/> levels into a reader-owned view.
@@ -198,6 +226,7 @@ public sealed class OrderBookL2
             }
 
             BookStamp stamp = _stamp;
+            int generation = _gridGeneration;
             BookHealth health = _health;
             BookFault fault = _fault;
             bool truncated = _truncated;
@@ -206,7 +235,8 @@ public sealed class OrderBookL2
             long v2 = Volatile.Read(ref _version);
             if (v1 == v2)
             {
-                view.Commit(Instrument, nb, na, stamp, health, fault, v1, truncated);
+                health = Effective(health, fault, Volatile.Read(ref _requested), out fault);
+                view.Commit(Instrument, nb, na, stamp, health, fault, v1, truncated, generation);
                 return true;
             }
 
@@ -232,9 +262,73 @@ public sealed class OrderBookL2
         return n;
     }
 
-    private void BeginWrite() => Interlocked.Increment(ref _version);
+    /// <summary>
+    /// Writer thread only. Returns the ODD version of this section.
+    /// Memory ordering: x64 `lock xadd` is a full fence. ARM64 (R-05, measured on ubuntu-24.04-arm, .NET 8, LSE): RyuJIT
+    /// emits `ldaddal xN, xM, [addr]` with a real destination register = acquire + release RMW, which orders the odd
+    /// version before the following data stores (aarch64.cat: po; [A]; amo; [L]; po). The hazardous lowering would be
+    /// `staddl` / `ldaddal …, xzr` (no acquire) — possible only if the result were unused, and it is used here
+    /// (<see cref="EndWrite"/>). Keep it consumed. Re-check with the CI job `seqlock-arm64` on runtime upgrades.
+    /// </summary>
+    private long BeginWrite()
+    {
+        long v = Interlocked.Increment(ref _version);
+        if ((v & 1) == 0)
+        {
+            // version was odd on entry: a second writer existed at some point (bug). Re-establish parity instead of
+            // running inverted forever (inverted = even only while writing → readers accept torn copies).
+            Interlocked.Increment(ref _parityRepairs);
+            v = Interlocked.Increment(ref _version);
+        }
 
-    private void EndWrite() => Volatile.Write(ref _version, _version + 1);
+        return v;
+    }
+
+    /// <summary>Even = stable. Computed from this section's own odd value, never re-read (no lost update).</summary>
+    private void EndWrite(long oddVersion) => Volatile.Write(ref _version, oddVersion + 1);
+
+    private void Raise(int request)
+    {
+        while (true)
+        {
+            int cur = Volatile.Read(ref _requested);
+            if ((cur & RequestInvalid) != 0 || (cur == request))
+            {
+                return; // already Invalid (first fault wins) or same request pending
+            }
+
+            if (request == RequestResync && cur != 0)
+            {
+                return; // Resync never downgrades a pending Invalid
+            }
+
+            if (Interlocked.CompareExchange(ref _requested, request, cur) == cur)
+            {
+                return;
+            }
+        }
+    }
+
+    private static BookHealth Effective(BookHealth health, BookFault fault, int request, out BookFault effectiveFault)
+    {
+        effectiveFault = fault;
+        if ((request & RequestInvalid) != 0)
+        {
+            if (health != BookHealth.Invalid)
+            {
+                effectiveFault = (BookFault)(byte)request;
+            }
+
+            return BookHealth.Invalid;
+        }
+
+        if (request == RequestResync && health != BookHealth.Invalid)
+        {
+            return BookHealth.Resyncing;
+        }
+
+        return health;
+    }
 
     private void SetFault(BookFault fault)
     {

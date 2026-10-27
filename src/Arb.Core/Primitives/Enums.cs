@@ -98,4 +98,30 @@ public static class PrimitiveExtensions
         MarketType.PerpLinear => "PERP_LINEAR",
         _ => throw new ArgumentOutOfRangeException(nameof(market), market, null),
     };
+
+    /// <summary>Code used by PostgreSQL schema (trd.order_leg.side, trd.fill.side).</summary>
+    public static string ToDbCode(this Side side) => side switch
+    {
+        Side.Buy => "BUY",
+        Side.Sell => "SELL",
+        _ => throw new ArgumentOutOfRangeException(nameof(side), side, null),
+    };
+
+    /// <summary>Code used by PostgreSQL schema (trd.order_leg.order_type).</summary>
+    public static string ToDbCode(this OrderType type) => type switch
+    {
+        OrderType.Limit => "LIMIT",
+        OrderType.Market => "MARKET",
+        _ => throw new ArgumentOutOfRangeException(nameof(type), type, null),
+    };
+
+    /// <summary>Code used by PostgreSQL schema (trd.order_leg.time_in_force).</summary>
+    public static string ToDbCode(this TimeInForce tif) => tif switch
+    {
+        TimeInForce.Ioc => "IOC",
+        TimeInForce.Fok => "FOK",
+        TimeInForce.Gtc => "GTC",
+        TimeInForce.PostOnly => "POST_ONLY",
+        _ => throw new ArgumentOutOfRangeException(nameof(tif), tif, null),
+    };
 }

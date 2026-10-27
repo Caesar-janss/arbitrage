@@ -59,10 +59,18 @@ public readonly struct SpatialParams
     public int MaxLevelsPerSide { get; init; }
 }
 
-/// <summary>Decision + everything needed to fire both IOC legs and to persist trd.opportunity.</summary>
+/// <summary>
+/// Decision + everything needed to fire both IOC legs and to persist trd.opportunity.
+/// Persistence contract (R-15): a price the pricer did not compute is NaN (never 0) and is written as NULL; when
+/// <see cref="HasExecutionPricing"/> is false, qty / VWAP / worst px / levels / edge / cost columns are NULL. V007 makes
+/// those columns nullable for every decision except EXECUTE.
+/// </summary>
 public readonly struct SpatialQuote
 {
     public RejectReason Decision { get; init; }
+
+    /// <summary>Both legs were walked and the edge computed (EXECUTE, or a reject after pricing).</summary>
+    public bool HasExecutionPricing { get; init; }
 
     public CrossStop Stop { get; init; }
 
@@ -109,7 +117,7 @@ public readonly struct SpatialQuote
 /// <summary>
 /// Spatial opportunity pricing pipeline (pure, allocation-free):
 ///  1) usable books → 2) Q* merge-walk with haircut/caps/hurdle → 3) snap to common lot (floor),
-///  gross-up buy leg if its fee is charged in base → 4) exact integer VWAP walks + marginal limit prices →
+///  gross-up buy leg if its fee is charged in base → 4) exact integer VWAP walks WITH THE SAME HAIRCUT + marginal limit prices →
 ///  5) venue minimums → 6) exact net edge vs MinProfit.
 /// Staleness, sanity (wallet status), inventory and halts are separate gates (Risk/*), applied by the engine.
 /// </summary>
@@ -129,7 +137,13 @@ public static class SpatialArbPricer
 
         if (!buyBook.IsUsable || !sellBook.IsUsable)
         {
-            return new SpatialQuote { Decision = RejectReason.RejectStale };
+            return Unpriced(RejectReason.RejectStale, default, double.NaN, double.NaN, double.NaN);
+        }
+
+        if (buyBook.GridGeneration != buy.GridGeneration || sellBook.GridGeneration != sell.GridGeneration)
+        {
+            // ticks/lots parsed with another grid (R-08): even the top of book is not a price
+            return Unpriced(RejectReason.RejectStale, default, double.NaN, double.NaN, double.NaN);
         }
 
         ReadOnlySpan<PriceLevel> asks = buyBook.Asks;
@@ -143,13 +157,13 @@ public static class SpatialArbPricer
         CrossResult cross = CrossedBookOptimizer.Optimize(asks, buy, bids, sell, costs, limits);
         if (cross.QtyCanon <= 0)
         {
-            return Reject(RejectReason.RejectThreshold, cross, askTob, bidTob, tobBps);
+            return Unpriced(RejectReason.RejectThreshold, cross, askTob, bidTob, tobBps);
         }
 
         long units = ctx.Grid.UnitsFloor(cross.QtyCanon);
         if (units <= 0)
         {
-            return Reject(RejectReason.RejectMinNotional, cross, askTob, bidTob, tobBps);
+            return Unpriced(RejectReason.RejectMinNotional, cross, askTob, bidTob, tobBps);
         }
 
         long sellLots = units * ctx.Grid.LotsPerUnitB;
@@ -158,23 +172,36 @@ public static class SpatialArbPricer
             ? LotNormalizer.GrossUpBuyLots(sellQtyExact, p.BuyFee.Rate, buy)
             : units * ctx.Grid.LotsPerUnitA;
 
-        VwapFill buyFill = VwapWalker.WalkLots(asks, buyLots);
-        VwapFill sellFill = VwapWalker.WalkLots(bids, sellLots);
+        // Same liquidity assumption as Q* (R-03): walk only HaircutPpm of each displayed level. The marginal level of
+        // this walk is the IOC limit, so the IOC can sweep FULL displayed size up to it and still fill the whole leg
+        // when only the haircut fraction is really there; VWAP / edge are priced at that (conservative) depth.
+        VwapFill buyFill = VwapWalker.WalkLots(asks, buyLots, p.HaircutPpm);
+        VwapFill sellFill = VwapWalker.WalkLots(bids, sellLots, p.HaircutPpm);
         if (!buyFill.IsComplete || !sellFill.IsComplete)
         {
-            return Reject(RejectReason.RejectThreshold, cross, askTob, bidTob, tobBps);
+            return Unpriced(RejectReason.RejectThreshold, cross, askTob, bidTob, tobBps);
         }
 
         if (!buy.MeetsMinimumsExact(buyLots, buyFill.NotionalUnits) || !sell.MeetsMinimumsExact(sellLots, sellFill.NotionalUnits))
         {
-            return Reject(RejectReason.RejectMinNotional, cross, askTob, bidTob, tobBps);
+            return Unpriced(RejectReason.RejectMinNotional, cross, askTob, bidTob, tobBps);
         }
 
         double buyVwap = buyFill.CanonicalVwap(buy);
         double sellVwap = sellFill.CanonicalVwap(sell);
+        double buyQty = buy.CanonicalQty(buyLots);
+        double sellQty = sell.CanonicalQty(sellLots);
+
+        // Residual (gross-up / base-fee dust) is valued WHERE it lands (R-19): long dust stays on the buy venue → its
+        // bid; short dust (base fee on the sell leg) must be bought back on the sell venue → its ask.
+        double residual = (buyQty * (p.BuyFee.Asset == FeeAssetKind.Base ? 1 - p.BuyFee.Rate : 1))
+            - (sellQty * (p.SellFee.Asset == FeeAssetKind.Base ? 1 + p.SellFee.Rate : 1));
+        double residualMark = residual >= 0
+            ? buy.CanonicalPrice(buyBook.Bids[0].PxTicks)
+            : sell.CanonicalPrice(sellBook.Asks[0].PxTicks);
         EdgeBreakdown edge = NetEdgeCalculator.Compute(new EdgeInputs(
-            buy.CanonicalQty(buyLots),
-            sell.CanonicalQty(sellLots),
+            buyQty,
+            sellQty,
             buyVwap,
             sellVwap,
             p.BuyFee,
@@ -182,11 +209,12 @@ public static class SpatialArbPricer
             p.BuySlipBps,
             p.SellSlipBps,
             p.RebalancePerUnitQuote,
-            sellVwap));
+            residualMark));
 
         return new SpatialQuote
         {
             Decision = edge.NetQuote >= p.MinProfitQuote ? RejectReason.Execute : RejectReason.RejectThreshold,
+            HasExecutionPricing = true,
             Stop = cross.Stop,
             BuyTobPx = askTob,
             SellTobPx = bidTob,
@@ -208,13 +236,20 @@ public static class SpatialArbPricer
         };
     }
 
-    private static SpatialQuote Reject(RejectReason reason, in CrossResult cross, double askTob, double bidTob, double tobBps) => new()
+    /// <summary>Reject before both legs were walked: execution columns NaN / 0 levels (→ NULL), TOB when known.</summary>
+    private static SpatialQuote Unpriced(RejectReason reason, in CrossResult cross, double askTob, double bidTob, double tobBps) => new()
     {
         Decision = reason,
+        HasExecutionPricing = false,
         Stop = cross.Stop,
         BuyTobPx = askTob,
         SellTobPx = bidTob,
         TobEdgeBps = tobBps,
+        BuyVwap = double.NaN,
+        SellVwap = double.NaN,
+        BuyWorstPx = double.NaN,
+        SellWorstPx = double.NaN,
         OptimizerQtyCanon = cross.QtyCanon,
+        Edge = EdgeBreakdown.NotComputed,
     };
 }

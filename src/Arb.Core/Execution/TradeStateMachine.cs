@@ -9,6 +9,15 @@ public enum TransitionError : byte
     StrategyNotAllowed = 2,
     TimeWentBackwards = 3,
     UninitializedState = 4,
+
+    /// <summary>Terminal state requested while a perp position (entry leg or hedge) is still open (TradeGroup).</summary>
+    OpenDerivativePosition = 5,
+
+    /// <summary>SPATIAL → POSITION_OPEN requested without an open perp hedge (TradeGroup).</summary>
+    NotHedged = 6,
+
+    /// <summary>Terminal state requested while net delta ≠ the residual explicitly accepted as dust (TradeGroup, R-14).</summary>
+    UnacceptedResidual = 7,
 }
 
 /// <summary>
@@ -17,9 +26,15 @@ public enum TransitionError : byte
 ///
 ///  CREATED → IN_FLIGHT → COMPLETED                         (spatial, both legs flat)
 ///          ↘ MISSED     ↘ MISSED                            (nothing filled)
-///                       ↘ POSITION_OPEN → EXITING → CLOSED  (funding)
+///                       ↘ POSITION_OPEN ⇄ EXITING → CLOSED  (funding; EXITING → POSITION_OPEN = partial reduce)
 ///                       ↘ RESIDUAL → REPAIRING → REPAIRED / POSITION_OPEN / CLOSED
 ///                       ↘ STUCK ←──────────── (repair failed) → REPAIRING | MANUAL_RESOLVED
+///   POSITION_OPEN → RESIDUAL (a leg liquidated / ADL'd) | STUCK (venue unreachable while holding)
+///
+/// Strategy rules (also in the DB trigger):
+///   funding  : never COMPLETED (it ends CLOSED, or REPAIRED when an entry legging is unwound).
+///   spatial  : POSITION_OPEN only from REPAIRING = a residual hedged on a perp (R-02). The hedged spot + perp legs
+///              are then owned by the trade until EXITING → CLOSED; a perp hedge never ends REPAIRED.
 /// </summary>
 public static class TradeStateMachine
 {
@@ -40,7 +55,10 @@ public static class TradeStateMachine
         (TradeState.Repairing, TradeState.Residual),
         (TradeState.Repairing, TradeState.Stuck),
         (TradeState.PositionOpen, TradeState.Exiting),
+        (TradeState.PositionOpen, TradeState.Residual), // R-10: one leg liquidated / ADL'd while holding
+        (TradeState.PositionOpen, TradeState.Stuck),    // R-10: venue unreachable / reconcile failed while holding
         (TradeState.Exiting, TradeState.Closed),
+        (TradeState.Exiting, TradeState.PositionOpen),  // R-10: partial reduce done, the rest stays open
         (TradeState.Exiting, TradeState.Residual),
         (TradeState.Exiting, TradeState.Stuck),
         (TradeState.Stuck, TradeState.Repairing),
@@ -60,11 +78,12 @@ public static class TradeStateMachine
     }
 
     /// <summary>Strategy constraints (also enforced by the DB trigger).</summary>
-    public static bool IsAllowedFor(StrategyKind strategy, TradeState to)
+    public static bool IsAllowedFor(StrategyKind strategy, TradeState from, TradeState to)
     {
         if (strategy == StrategyKind.Spatial)
         {
-            return to is not (TradeState.PositionOpen or TradeState.Exiting or TradeState.Closed);
+            // a spatial trade holds a position only as a perp-hedged residual (REPAIRING → POSITION_OPEN)
+            return to != TradeState.PositionOpen || from == TradeState.Repairing;
         }
 
         return to != TradeState.Completed;
@@ -82,7 +101,7 @@ public static class TradeStateMachine
             return TransitionError.IllegalTransition;
         }
 
-        if (!IsAllowedFor(strategy, to))
+        if (!IsAllowedFor(strategy, record.State, to))
         {
             return TransitionError.StrategyNotAllowed;
         }

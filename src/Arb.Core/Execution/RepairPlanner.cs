@@ -5,6 +5,7 @@ using Arb.Core.Primitives;
 
 namespace Arb.Core.Execution;
 
+/// <summary>Mirrors trd.trade_group.repair_method (None = NULL). Contract-tested against the SQL CHECK (R-20).</summary>
 public enum RepairMethod : byte
 {
     None = 0,
@@ -12,6 +13,23 @@ public enum RepairMethod : byte
     CompleteBuyLeg = 2,
     Unwind = 3,
     PerpHedge = 4,
+
+    /// <summary>Resolved by the operator (STUCK → MANUAL_RESOLVED); never planned by RepairPlanner.</summary>
+    Manual = 5,
+}
+
+public static class RepairMethodInfo
+{
+    /// <summary>Code used by PostgreSQL schema (trd.trade_group.repair_method). None has no code (NULL).</summary>
+    public static string ToDbCode(this RepairMethod method) => method switch
+    {
+        RepairMethod.CompleteSellLeg => "COMPLETE_SELL_LEG",
+        RepairMethod.CompleteBuyLeg => "COMPLETE_BUY_LEG",
+        RepairMethod.Unwind => "UNWIND",
+        RepairMethod.PerpHedge => "PERP_HEDGE",
+        RepairMethod.Manual => "MANUAL",
+        _ => throw new ArgumentOutOfRangeException(nameof(method), method, "None is stored as NULL"),
+    };
 }
 
 public enum RepairVerdict : byte
@@ -40,6 +58,12 @@ public readonly struct RepairCandidate
 
     /// <summary>Taker fee rate (fraction) on this venue.</summary>
     public double FeeRate { get; init; }
+
+    /// <summary>
+    /// Where the fee lands (FeeModel.Resolve). Base on a BUY = taken from the received coins → the order is grossed up
+    /// like the entry leg (R-13); Base on a SELL = extra coins leave the wallet → the order is sized down. Default = quote.
+    /// </summary>
+    public FeeAssetKind FeeAsset { get; init; }
 
     /// <summary>False when the venue is halted (e.g. HTTP 429), the book is stale, or inventory is missing.</summary>
     public bool Available { get; init; }
@@ -82,6 +106,9 @@ public readonly struct RepairPlan
 
     /// <summary>Residual left after this order because it is below one lot of the chosen venue.</summary>
     public double UntradeableCanon { get; init; }
+
+    /// <summary>Flat / BelowVenueMinimum: |residual| × reference price — what accepting it as dust writes off (alert above budget).</summary>
+    public double DustQuote { get; init; }
 
     public double ExpectedVwap { get; init; }
 
@@ -129,9 +156,10 @@ public static class RepairPlanner
 
         double residual = (double)netBaseDelta;
         double absRes = Math.Abs(residual);
+        decimal absResExact = Math.Abs(netBaseDelta);
         if (absRes <= policy.DustCanon)
         {
-            return new RepairPlan { Verdict = RepairVerdict.Flat, ResidualCanon = residual, CandidateIndex = -1 };
+            return new RepairPlan { Verdict = RepairVerdict.Flat, ResidualCanon = residual, CandidateIndex = -1, DustQuote = absRes * referencePx };
         }
 
         Side side = residual > 0 ? Side.Sell : Side.Buy;
@@ -149,12 +177,18 @@ public static class RepairPlanner
         for (int k = 0; k < candidates.Length; k++)
         {
             ref readonly RepairCandidate c = ref candidates[k];
-            if (!c.Available || c.Spec is null || c.Book is null || !c.Book.IsUsable || c.Book.Instrument != c.Spec.Key)
+            if (!c.Available || c.Spec is null || c.Book is null || !c.Book.IsUsable || c.Book.Instrument != c.Spec.Key
+                || c.Book.GridGeneration != c.Spec.GridGeneration)
             {
                 continue;
             }
 
-            long lots = c.Spec.LotsFromCanonical(absRes, Rounding.Down);
+            bool baseFee = c.FeeAsset == FeeAssetKind.Base && c.FeeRate > 0;
+            long lots = !baseFee
+                ? c.Spec.LotsFromCanonical(absRes, Rounding.Down)
+                : side == Side.Buy
+                    ? LotNormalizer.GrossUpBuyLots(absResExact, c.FeeRate, c.Spec)      // receive ≥ residual
+                    : c.Spec.LotsFromCanonical(absRes / (1 + c.FeeRate), Rounding.Down); // sold + fee ≤ residual
             if (lots <= 0)
             {
                 anyBelowMinimum = true;
@@ -174,7 +208,10 @@ public static class RepairPlanner
                 continue;
             }
 
-            double perUnit = side == Side.Sell ? vwap * (1 - c.FeeRate) : vwap * (1 + c.FeeRate);
+            // cost per unit of residual actually flattened: a base fee changes the quantity, not the cash
+            double perUnit = side == Side.Sell
+                ? (baseFee ? vwap / (1 + c.FeeRate) : vwap * (1 - c.FeeRate))
+                : (baseFee ? vwap / (1 - c.FeeRate) : vwap * (1 + c.FeeRate));
             double cost = (side == Side.Sell ? referencePx - perUnit : perUnit - referencePx) / referencePx * 1e4;
             cost += c.ExtraCostBps;
             double fillRatio = (double)fill.FilledLots / lots;
@@ -201,6 +238,7 @@ public static class RepairPlanner
                 ResidualCanon = residual,
                 UntradeableCanon = absRes,
                 CandidateIndex = -1,
+                DustQuote = anyBelowMinimum ? absRes * referencePx : 0,
             };
         }
 
@@ -217,6 +255,11 @@ public static class RepairPlanner
         }
 
         double planned = chosen.Spec.CanonicalQty(bestLots);
+        if (chosen.FeeAsset == FeeAssetKind.Base && chosen.FeeRate > 0)
+        {
+            planned = side == Side.Buy ? planned * (1 - chosen.FeeRate) : planned * (1 + chosen.FeeRate); // residual flattened
+        }
+
         return new RepairPlan
         {
             Verdict = RepairVerdict.Planned,

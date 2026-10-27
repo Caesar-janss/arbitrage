@@ -219,6 +219,8 @@ $$;
 -- ---------------------------------------------------------------------
 SELECT pg_temp.trade(1001, 1, 'SPATIAL', 'BTC', 1, 2, 0.01, 60000, 60150, 1.0515, 0.3485, '2026-10-22 01:00:00+00');
 UPDATE trd.trade_group SET opportunity_id = 501, opportunity_at = '2026-10-22 01:00:00+00' WHERE trade_id = 1001;
+-- R-16: komponen ekspektasi disimpan terpisah (= opp 501: buffer slippage 0.08, rebalance amortisasi 0.02)
+UPDATE trd.trade_group SET exp_slippage_buffer_quote = 0.08, exp_rebalance_quote = 0.02 WHERE trade_id = 1001;
 SELECT pg_temp.ord(10011, 1001, 'ENTRY_BUY',  1, 'BUY',  60010, 0.01, '2026-10-22 01:00:00.001+00');
 SELECT pg_temp.ord(10012, 1001, 'ENTRY_SELL', 2, 'SELL', 60140, 0.01, '2026-10-22 01:00:00.001+00');
 SELECT pg_temp.trans(1001, 'IN_FLIGHT', '2026-10-22 01:00:00.002+00');
@@ -425,6 +427,9 @@ SELECT pg_temp.assert_true('STUCK bukan terminal → closed_at NULL',
 \echo '--- PnL ledger ---'
 SELECT pg_temp.assert_eq('1001 realized',  (SELECT realized_pnl_quote FROM rpt.v_trade_ledger WHERE trade_id = 1001), 0.4485);
 SELECT pg_temp.assert_eq('1001 entry buy VWAP dari 2 fill', (SELECT entry_buy_vwap_px FROM rpt.v_trade_ledger WHERE trade_id = 1001), 60000);
+SELECT pg_temp.assert_eq('R-16: 1001 exp_cash = exp_net + buffer slippage + rebalance', (SELECT exp_cash_quote FROM rpt.v_trade_ledger WHERE trade_id = 1001), 0.4485);
+SELECT pg_temp.assert_eq('R-16: 1001 capture ratio = 1 (trade sempurna, basis sama; v0.2: 1.29)', (SELECT capture_ratio FROM rpt.v_trade_ledger WHERE trade_id = 1001), 1);
+SELECT pg_temp.assert_eq('R-16: 1001 shortfall = 0', (SELECT shortfall_quote FROM rpt.v_trade_ledger WHERE trade_id = 1001), 0);
 SELECT pg_temp.assert_eq('1002 realized (unwind)', (SELECT realized_pnl_quote FROM rpt.v_trade_ledger WHERE trade_id = 1002), -1.4988003);
 SELECT pg_temp.assert_eq('1002 net_base_delta = 0 (fee base ikut dihitung)',
        (SELECT net_base_delta FROM rpt.v_trade_ledger WHERE trade_id = 1002), 0);
@@ -450,8 +455,11 @@ SELECT pg_temp.assert_eq('daily LIVE SPATIAL realized',
        (SELECT realized_pnl_quote FROM rpt.v_daily_pnl WHERE day_utc = '2026-10-22' AND mode = 'LIVE' AND strategy = 'SPATIAL'), -1.6561053);
 SELECT pg_temp.assert_eq('daily LIVE SPATIAL win_rate (missed dikecualikan)',
        (SELECT win_rate FROM rpt.v_daily_pnl WHERE day_utc = '2026-10-22' AND mode = 'LIVE' AND strategy = 'SPATIAL'), 0.25);
+-- R-16: basis expected = exp_cash (v0.2: exp_net → −3.0823)
 SELECT pg_temp.assert_eq('daily LIVE SPATIAL capture_ratio_filled',
-       (SELECT capture_ratio_filled FROM rpt.v_daily_pnl WHERE day_utc = '2026-10-22' AND mode = 'LIVE' AND strategy = 'SPATIAL'), -3.0823, 0.00005);
+       (SELECT capture_ratio_filled FROM rpt.v_daily_pnl WHERE day_utc = '2026-10-22' AND mode = 'LIVE' AND strategy = 'SPATIAL'), -2.5986, 0.00005);
+SELECT pg_temp.assert_eq('R-16: daily expected cash (filled) = Σ exp_cash',
+       (SELECT expected_cash_filled FROM rpt.v_daily_pnl WHERE day_utc = '2026-10-22' AND mode = 'LIVE' AND strategy = 'SPATIAL'), 0.6373);
 SELECT pg_temp.assert_eq('funnel: REJECT_STALE terhitung',
        (SELECT n FROM rpt.v_opportunity_funnel WHERE day_utc = '2026-10-22' AND decision = 'REJECT_STALE'), 1);
 SELECT pg_temp.assert_eq('funnel: ilusi likuiditas opp 501 (bps)',
@@ -574,6 +582,164 @@ SELECT pg_temp.expect_error('order: role ENTRY_BUY dengan side SELL',
      VALUES (99999, 1001, 'ENTRY_BUY', 1, 'SELL', 'LIMIT', 'IOC', 'arb-99999', 60000, 0.01, 'SENT', now())$q$, '23514');
 SELECT pg_temp.expect_error('order: cum_filled > req_qty',
   $q$UPDATE trd.order_leg SET cum_filled_qty_venue = 0.02 WHERE order_id = 10012$q$, '23514');
+ROLLBACK;
+
+-- =====================================================================
+-- REGRESSION v0.3 — temuan review Tahap 1 (docs/review/stage1/REGRESSION_LOG.md).
+-- Di-rollback: skenario di sini tidak mengubah angka assertion di atas.
+-- =====================================================================
+\echo '--- regression v0.3 (di-rollback) ---'
+-- expect_error + cek isi pesan: assert yang lulus karena ALASAN LAIN (mis. transisi ilegal di tabel) = gagal (R-20)
+CREATE FUNCTION pg_temp.expect_error_like(p_label text, p_sql text, p_state text, p_like text)
+RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    BEGIN
+        EXECUTE p_sql;
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLSTATE = p_state AND SQLERRM LIKE p_like THEN
+            RAISE NOTICE 'PASS  % → ditolak % (%)', p_label, SQLSTATE, SQLERRM;
+            RETURN;
+        END IF;
+        RAISE EXCEPTION 'FAIL  %  expected % LIKE % got % (%)', p_label, p_state, p_like, SQLSTATE, SQLERRM;
+    END;
+    RAISE EXCEPTION 'FAIL  %  expected error % tapi statement sukses', p_label, p_state;
+END $$;
+
+BEGIN;
+INSERT INTO ref.instrument (exchange_code, market_type, venue_symbol, base_asset, quote_asset,
+                            base_multiplier, tick_size, step_size, min_notional, funding_interval_h)
+VALUES ('BYBIT','PERP_LINEAR','BTCUSDT','BTC','USDT', 1, 0.1, 0.001, 5, 8);
+
+-- R-02: residual SPATIAL di-hedge di perp → POSITION_OPEN sampai spot DAN perp di-unwind (bukan REPAIRED)
+SELECT pg_temp.trade(1008, 1, 'SPATIAL', 'BTC', 3, 2, 0.01, 60000, 60120, 1.08, 0.07, '2026-10-22 11:00:00+00');
+SELECT pg_temp.ord(10081, 1008, 'ENTRY_BUY',  3, 'BUY',  60005, 0.01, '2026-10-22 11:00:00.001+00');
+SELECT pg_temp.ord(10082, 1008, 'ENTRY_SELL', 2, 'SELL', 60110, 0.01, '2026-10-22 11:00:00.001+00');
+SELECT pg_temp.trans(1008, 'IN_FLIGHT', '2026-10-22 11:00:00.002+00');
+SELECT pg_temp.rpt(10081, 'FILLED', 0.01, 60000, '2026-10-22 11:00:00.040+00');
+SELECT pg_temp.fill(10081, '1008-1', 60000, 0.01, 0.6, 'BGB', 0.48, '2026-10-22 11:00:00.039+00');
+SELECT pg_temp.rpt(10082, 'CANCELED', 0, NULL, '2026-10-22 11:00:00.060+00');
+SELECT pg_temp.trans(1008, 'RESIDUAL', '2026-10-22 11:00:00.061+00', 'sell leg IOC 0% fill');
+UPDATE trd.trade_group SET repair_method = 'PERP_HEDGE' WHERE trade_id = 1008;
+SELECT pg_temp.trans(1008, 'REPAIRING', '2026-10-22 11:00:00.062+00');
+SELECT pg_temp.ord(10083, 1008, 'REPAIR', pg_temp.inst('BYBIT','PERP_LINEAR','BTCUSDT'), 'SELL', 59930, 0.01, '2026-10-22 11:00:00.062+00');
+SELECT pg_temp.rpt(10083, 'FILLED', 0.01, 59990, '2026-10-22 11:00:00.090+00');
+SELECT pg_temp.fill(10083, '1008-2', 59990, 0.01, 0.329945, 'USDT', 0.329945, '2026-10-22 11:00:00.089+00');
+SELECT pg_temp.expect_error_like('R-02: hedge PERP_HEDGE tidak boleh berakhir REPAIRED',
+  $q$UPDATE trd.trade_group SET state='REPAIRED', state_version=state_version+1, state_changed_at='2026-10-22 11:00:00.095+00' WHERE trade_id=1008$q$,
+  'AR002', '%tidak boleh berakhir REPAIRED%');
+SELECT pg_temp.trans(1008, 'POSITION_OPEN', '2026-10-22 11:00:00.100+00', 'hedged: spot long + perp short');
+SELECT pg_temp.assert_true('R-02: delta 0 tetapi TIDAK flat (perp short terbuka)',
+       (SELECT net_base_delta = 0 AND NOT is_flat AND open_perp_qty_base = 0.01 FROM rpt.v_trade_ledger WHERE trade_id = 1008));
+SELECT pg_temp.assert_true('R-02: hedge terbuka terlihat di v_open_exposure (StartupRecovery)',
+       EXISTS (SELECT 1 FROM rpt.v_open_exposure WHERE trade_id = 1008 AND open_perp_qty_base = 0.01));
+SELECT pg_temp.trans(1008, 'EXITING', '2026-10-22 11:05:00+00', 'unwind hedge');
+SELECT pg_temp.ord(10084, 1008, 'EXIT_SELL', 3, 'SELL', 60000, 0.01, '2026-10-22 11:05:00.001+00');
+SELECT pg_temp.ord(10085, 1008, 'EXIT_BUY', pg_temp.inst('BYBIT','PERP_LINEAR','BTCUSDT'), 'BUY', 60010, 0.01, '2026-10-22 11:05:00.001+00');
+SELECT pg_temp.rpt(10084, 'FILLED', 0.01, 60010, '2026-10-22 11:05:00.040+00');
+SELECT pg_temp.fill(10084, '1008-3', 60010, 0.01, 0.48008, 'USDT', 0.48008, '2026-10-22 11:05:00.039+00');
+SELECT pg_temp.rpt(10085, 'FILLED', 0.01, 60000, '2026-10-22 11:05:00.041+00');
+SELECT pg_temp.fill(10085, '1008-4', 60000, 0.01, 0.33, 'USDT', 0.33, '2026-10-22 11:05:00.040+00');
+SELECT pg_temp.trans(1008, 'CLOSED', '2026-10-22 11:05:00.050+00');
+SELECT pg_temp.assert_eq('R-02: hedge ditutup → realized (fee 4 kaki)',
+       (SELECT realized_pnl_quote FROM rpt.v_trade_ledger WHERE trade_id = 1008), -1.620025);
+SELECT pg_temp.assert_true('R-02: setelah CLOSED tidak lagi di v_open_exposure',
+       NOT EXISTS (SELECT 1 FROM rpt.v_open_exposure WHERE trade_id = 1008));
+
+-- R-02: SPATIAL masuk POSITION_OPEN hanya dari REPAIRING dengan PERP_HEDGE
+SELECT pg_temp.trade(1009, 1, 'SPATIAL', 'BTC', 3, 2, 0.01, 60000, 60120, 1.08, 0.07, '2026-10-22 12:00:00+00');
+SELECT pg_temp.trans(1009, 'IN_FLIGHT', '2026-10-22 12:00:00.002+00');
+SELECT pg_temp.expect_error_like('R-02: SPATIAL IN_FLIGHT → POSITION_OPEN tetap ditolak',
+  $q$UPDATE trd.trade_group SET state='POSITION_OPEN', state_version=2, state_changed_at='2026-10-22 12:00:00.003+00' WHERE trade_id=1009$q$,
+  'AR002', '%SPATIAL hanya masuk POSITION_OPEN%');
+SELECT pg_temp.trans(1009, 'RESIDUAL', '2026-10-22 12:00:00.050+00');
+UPDATE trd.trade_group SET repair_method = 'UNWIND' WHERE trade_id = 1009;
+SELECT pg_temp.trans(1009, 'REPAIRING', '2026-10-22 12:00:00.051+00');
+SELECT pg_temp.expect_error_like('R-02: SPATIAL REPAIRING → POSITION_OPEN tanpa PERP_HEDGE ditolak',
+  $q$UPDATE trd.trade_group SET state='POSITION_OPEN', state_version=4, state_changed_at='2026-10-22 12:00:00.060+00' WHERE trade_id=1009$q$,
+  'AR002', '%dengan PERP_HEDGE (dari REPAIRING, metode UNWIND)%');
+
+-- R-02: label salah (repair_method UNWIND) tapi fill perp nyata → REPAIRED tetap terdeteksi sebagai eksposur terbuka
+SELECT pg_temp.ord(10091, 1009, 'REPAIR', pg_temp.inst('BYBIT','PERP_LINEAR','BTCUSDT'), 'SELL', 59930, 0.01, '2026-10-22 12:00:00.052+00');
+SELECT pg_temp.rpt(10091, 'FILLED', 0.01, 59990, '2026-10-22 12:00:00.080+00');
+SELECT pg_temp.fill(10091, '1009-1', 59990, 0.01, 0.329945, 'USDT', 0.329945, '2026-10-22 12:00:00.079+00');
+SELECT pg_temp.trans(1009, 'REPAIRED', '2026-10-22 12:00:00.090+00');
+SELECT pg_temp.assert_true('R-02: REPAIRED dengan perp terbuka tetap di v_open_exposure',
+       EXISTS (SELECT 1 FROM rpt.v_open_exposure WHERE trade_id = 1009 AND NOT is_flat AND open_perp_qty_base = 0.01));
+
+-- R-10: posisi funding: partial reduce (EXITING → POSITION_OPEN), likuidasi satu kaki (POSITION_OPEN → RESIDUAL),
+--       venue tak terjangkau saat menahan posisi (POSITION_OPEN → STUCK)
+SELECT pg_temp.trade(1010, 1, 'FUNDING_PERP_PERP', 'PEPE', 5, 4, 100000000, 0.000012, 0.000012006, 2.4, 0.5, '2026-10-22 13:00:00+00');
+SELECT pg_temp.trans(1010, 'IN_FLIGHT',     '2026-10-22 13:00:00.002+00');
+SELECT pg_temp.trans(1010, 'POSITION_OPEN', '2026-10-22 13:00:00.050+00');
+SELECT pg_temp.trans(1010, 'EXITING',       '2026-10-22 14:00:00+00', 'MarginGuard ReducePair 40%');
+SELECT pg_temp.trans(1010, 'POSITION_OPEN', '2026-10-22 14:00:00.080+00', 'partial reduce selesai, 60% tetap terbuka');
+SELECT pg_temp.trans(1010, 'RESIDUAL',      '2026-10-22 15:00:00+00', 'short Binance dilikuidasi / ADL');
+SELECT pg_temp.trans(1010, 'REPAIRING',     '2026-10-22 15:00:00.010+00');
+SELECT pg_temp.trans(1010, 'CLOSED',        '2026-10-22 15:00:00.200+00');
+SELECT pg_temp.assert_text('R-10: urutan state 1010 (reduce → likuidasi → tutup)',
+       (SELECT string_agg(to_state, '>' ORDER BY seq) FROM trd.trade_state_log WHERE trade_id = 1010),
+       'CREATED>IN_FLIGHT>POSITION_OPEN>EXITING>POSITION_OPEN>RESIDUAL>REPAIRING>CLOSED');
+SELECT pg_temp.trade(1011, 1, 'FUNDING_SPOT_PERP', 'PEPE', 6, 4, 100000000, 0.000012, 0.000012006, 2.4, 0.5, '2026-10-22 13:00:00+00');
+SELECT pg_temp.trans(1011, 'IN_FLIGHT',     '2026-10-22 13:00:00.002+00');
+SELECT pg_temp.trans(1011, 'POSITION_OPEN', '2026-10-22 13:00:00.050+00');
+SELECT pg_temp.trans(1011, 'STUCK',         '2026-10-22 16:00:00+00', 'venue down saat menahan posisi');
+SELECT pg_temp.assert_true('R-10: POSITION_OPEN → STUCK (bukan terminal, closed_at NULL)',
+       (SELECT state = 'STUCK' AND closed_at IS NULL FROM trd.trade_group WHERE trade_id = 1011));
+
+-- R-14: SATU definisi flat. Residual 0.00008 BTC (4.8 USDT) < min notional Binance → engine menerimanya sebagai dust
+--       (TradeGroup.AcceptResidualAsDust → dust_accepted_base). v0.2: |4.8| > dust_quote 1.0 → tidak flat selamanya,
+--       realized NULL, tidak terhitung di loss streak, muncul lagi di v_open_exposure setiap startup.
+SELECT pg_temp.trade(1012, 1, 'SPATIAL', 'BTC', 1, 2, 0.01, 60000, 60000, 1.2, 0.01, '2026-10-22 12:30:00+00');
+SELECT pg_temp.ord(10121, 1012, 'ENTRY_BUY',  1, 'BUY',  60005, 0.01, '2026-10-22 12:30:00.001+00');
+SELECT pg_temp.ord(10122, 1012, 'ENTRY_SELL', 2, 'SELL', 59995, 0.01, '2026-10-22 12:30:00.001+00');
+SELECT pg_temp.trans(1012, 'IN_FLIGHT', '2026-10-22 12:30:00.002+00');
+SELECT pg_temp.rpt(10121, 'FILLED', 0.01, 60000, '2026-10-22 12:30:00.040+00');
+SELECT pg_temp.fill(10121, '1012-1', 60000, 0.01, 0.6, 'USDT', 0.6, '2026-10-22 12:30:00.039+00');
+SELECT pg_temp.rpt(10122, 'CANCELED', 0.00992, 60000, '2026-10-22 12:30:00.050+00');
+SELECT pg_temp.fill(10122, '1012-2', 60000, 0.00992, 0.5952, 'USDT', 0.5952, '2026-10-22 12:30:00.049+00');
+SELECT pg_temp.trans(1012, 'RESIDUAL',  '2026-10-22 12:30:00.060+00', 'sell 99.2%');
+UPDATE trd.trade_group SET repair_method = 'UNWIND' WHERE trade_id = 1012;
+SELECT pg_temp.trans(1012, 'REPAIRING', '2026-10-22 12:30:00.061+00');
+UPDATE trd.trade_group SET dust_accepted_base = 0.00008 WHERE trade_id = 1012; -- BelowVenueMinimum → dust
+SELECT pg_temp.trans(1012, 'REPAIRED',  '2026-10-22 12:30:00.300+00', 'residual 0.00008 BTC diterima sebagai dust');
+SELECT pg_temp.assert_true('R-14: dust yang diterima engine = flat di DB',
+       (SELECT is_flat FROM rpt.v_trade_ledger WHERE trade_id = 1012));
+SELECT pg_temp.assert_eq('R-14: realized termasuk nilai dust (cash − 5.9952 + 0.00008 × 60000)',
+       (SELECT realized_pnl_quote FROM rpt.v_trade_ledger WHERE trade_id = 1012), -1.1952);
+SELECT pg_temp.assert_eq('R-14: dust_accepted_quote terlihat untuk monitoring',
+       (SELECT dust_accepted_quote FROM rpt.v_trade_ledger WHERE trade_id = 1012), 4.8);
+SELECT pg_temp.assert_true('R-14: dust trade tidak muncul di v_open_exposure',
+       NOT EXISTS (SELECT 1 FROM rpt.v_open_exposure WHERE trade_id = 1012));
+-- loss streak SPATIAL sejak reset operator 06:00: 1012 (rugi), 1009 (REPAIRED tak flat = PnL tak diketahui → rugi), 1008 (rugi)
+SELECT pg_temp.assert_eq('R-14: loss streak menghitung trade dust & terminal-tak-flat',
+       risk.fn_consecutive_losses('LIVE', 'SPATIAL'), 3);
+-- fill terlambat setelah dust diterima → tidak flat lagi (rekonsiliasi harus melihatnya)
+SELECT pg_temp.fill(10122, '1012-3', 60000, 0.00001, 0, 'USDT', 0, '2026-10-22 12:30:00.051+00');
+SELECT pg_temp.assert_true('R-14: fill terlambat → tidak flat & muncul di v_open_exposure',
+       EXISTS (SELECT 1 FROM rpt.v_open_exposure WHERE trade_id = 1012 AND NOT is_flat));
+
+-- R-15: baris reject dari SpatialArbPricer (kolom yang tidak dihitung = NULL) harus bisa disimpan;
+--       EXECUTE tetap wajib lengkap.
+INSERT INTO trd.opportunity (opportunity_id, detected_at, run_id, strategy, canonical_asset,
+    buy_instrument_id, sell_instrument_id, buy_tob_px, sell_tob_px, buy_book_age_us, sell_book_age_us, decision)
+VALUES (601, '2026-10-22 13:00:00+00', 1, 'SPATIAL', 'BTC', 1, 2, 60000, 60010, 1000, 1200, 'REJECT_THRESHOLD'),  -- near-miss
+       (602, '2026-10-22 13:00:01+00', 1, 'SPATIAL', 'BTC', 1, 2, NULL,  NULL,  1000, 900000, 'REJECT_STALE');    -- book resync
+SELECT pg_temp.assert_eq('R-15: reject tanpa VWAP tersimpan (near-miss + stale)',
+       (SELECT count(*) FROM trd.opportunity WHERE opportunity_id IN (601, 602)), 2);
+SELECT pg_temp.assert_true('R-15: funnel tetap terhitung dengan kolom NULL',
+       (SELECT n >= 1 FROM rpt.v_opportunity_funnel WHERE day_utc = '2026-10-22' AND decision = 'REJECT_STALE'));
+-- R-16: biaya rebalance riil (acct.transfer) vs amortisasi yang diasumsikan trade, per hari
+INSERT INTO acct.transfer (asset_code, from_exchange, to_exchange, network, amount, fee_amount, fee_quote, status, requested_at, completed_at)
+VALUES ('USDT', 'BYBIT', 'BINANCE', 'TRC20', 500, 1.5, 1.5, 'COMPLETED', '2026-10-22 18:00+00', '2026-10-22 18:05+00');
+SELECT pg_temp.assert_true('R-16: v_rebalance_cost_daily membandingkan ekspektasi (0.02) vs riil (1.5)',
+       (SELECT expected_rebalance_quote = 0.02 AND realized_transfer_fee_quote = 1.5 AND model_error_quote = 1.48
+          FROM rpt.v_rebalance_cost_daily WHERE day_utc = '2026-10-22'));
+
+SELECT pg_temp.expect_error_like('R-15: EXECUTE tanpa VWAP ditolak',
+  $q$INSERT INTO trd.opportunity (opportunity_id, detected_at, run_id, strategy, canonical_asset,
+      buy_instrument_id, sell_instrument_id, buy_book_age_us, sell_book_age_us, decision)
+     VALUES (603, '2026-10-22 13:00:02+00', 1, 'SPATIAL', 'BTC', 1, 2, 1000, 1000, 'EXECUTE')$q$,
+  '23514', '%opportunity_execute_complete%');
 ROLLBACK;
 
 -- =====================================================================

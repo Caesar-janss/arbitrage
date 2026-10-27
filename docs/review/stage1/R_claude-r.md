@@ -6,7 +6,7 @@ independen oleh Claude (lead) → output identik.** Angka kunci dicek ulang deng
 
 | ID | Sev | Area | Klaim | Bukti (skenario) |
 |---|---|---|---|---|
-| R-01 | S1 | `Risk/MarginGuard.cs`, `LiquidationCalculator.cs` | Jarak likuidasi dihitung per posisi terhadap SELURUH equity cross. Akun dengan >1 posisi dilaporkan jauh lebih aman dari kenyataan | P11: 2 short @3000 notional, equity 1000 → per posisi 3194 bps/None; level akun (naik bersamaan) 1545 bps (zona Reduce) |
+| R-01 | S1 | `Risk/MarginGuard.cs`, `LiquidationCalculator.cs` | Jarak likuidasi dihitung per posisi terhadap SELURUH equity cross. Akun dengan >1 posisi dilaporkan jauh lebih aman dari kenyataan | P11: 2 short @3000 notional, equity 1000 → per posisi 3194 bps/None; level akun (naik bersamaan) 1545 bps (zona **Warn**: 1500 < 1545 ≤ 2500)¹ |
 | R-02 | S1 | `TradeStateMachine.IsAllowedFor`, `RepairPlanner` PerpHedge, `V005 v_open_exposure` | Residual spatial yang di-hedge di perp berakhir REPAIRED (terminal) padahal spot + perp tetap terbuka; tidak ada pemilik unwind/funding/likuidasi | P18 |
 | R-03 | S2 | `Pricing/SpatialArbPricer.cs` | Q* memakai haircut, tetapi limit IOC/VWAP/edge memakai 100% depth → IOC terisi sebagian, edge overstated | P01: haircut 50% → limit L1 saja, terisi 500/1000 lot, residual 0,005 BTC; edge +3,2% |
 | R-04 | S2 | `MarketData/OrderBookL2.cs` MarkInvalid/MarkResyncing/EndWrite | Pemanggilan dari thread non-writer merusak versi seqlock; parity bisa terbalik permanen (snapshot tidak memulihkan) → torn read diterima sebagai Synced | P12, P22: 1.068.578 torn dari 1.112.839 read diterima |
@@ -26,6 +26,10 @@ independen oleh Claude (lead) → output identik.** Angka kunci dicek ulang deng
 | R-18 | S3 | `FundingYieldCalculator`, `RiskLimits.Validate` | Gate NaN fail-open, hold = +∞ tetap Enter, MinFundingNetApr tidak divalidasi | P05 |
 | R-19 | S3 | `SpatialArbPricer` ResidualMarkPx | Dust gross-up ada di venue BELI tetapi dinilai pakai VWAP venue JUAL → net overstated | P21: 9,2% dari net |
 | R-20 | S4 | `tests/*`, `DbContractTests` | Beberapa test lulus karena alasan yang salah / kasus penting tidak ada; enum yang di-mirror ke SQL tidak semua dikontrak-test | — |
+
+¹ Koreksi 2026-10-27 (ditandai reviewer ChatGPT): versi awal laporan ini menulis "zona Reduce". Dengan threshold default
+`Warn 2500 / Reduce 1500 / Critical 800`, 1545 bps ada di zona Warn. Severity S1 tidak berubah: guard per posisi
+melaporkan `Healthy/None` padahal level akun sudah di zona Warn dan bergerak ke Reduce lebih cepat dari yang diukur.
 
 ## Verified OK (menurut reviewer, dirangkum)
 Parser `Utf8Decimal` + `DecimalGrid` (fuzz 185.901 string, 0 mismatch), penanganan BaseMultiplier/1000PEPE,

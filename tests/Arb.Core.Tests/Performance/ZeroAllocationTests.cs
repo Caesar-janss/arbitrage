@@ -122,6 +122,12 @@ public class ZeroAllocationTests
         var exposure = new PerpExposure(Side.Sell, 100_000_000, 0.000012, 180, MarginMode.Cross);
         AssertZeroAlloc("Liquidation", () => LiquidationCalculator.Estimate(exposure, tiers, 0.00055));
         AssertZeroAlloc("MarginGuard", () => MarginGuard.Evaluate(exposure, tiers, 0.00055, 0.00055, thresholds, 50));
+        AccountPosition[] account =
+        {
+            new(Side.Sell, 100_000_000, 0.000012, tiers, 0.00055, 0.00055),
+            new(Side.Sell, 0.02, 60_000, tiers, 0.00055, 0.00055),
+        };
+        AssertZeroAlloc("MarginGuard.EvaluateAccount", () => MarginGuard.EvaluateAccount(account, 500, thresholds, 50));
 
         AssertZeroAlloc("TradeStateMachine", () =>
         {
@@ -134,7 +140,8 @@ public class ZeroAllocationTests
         AssertZeroAlloc("TradeGroup", () =>
         {
             group.Initialize(1, StrategyKind.Spatial, _m.BitgetBtcSpot.Key, _m.BybitBtcSpot.Key, 0.01m, 0);
-            group.ApplyFill(Side.Buy, 0.01m, 600m, 0.00001m, FeeAssetKind.Base, 0.6m);
+            group.ApplyFill(_m.BitgetBtcSpot.Key, Side.Buy, 0.01m, 600m, 0.00001m, FeeAssetKind.Base, 0.6m);
+            group.ApplyFill(_m.BybitBtcPerp.Key, Side.Sell, 0.01m, 600m, 0.33m, FeeAssetKind.Quote, 0.33m);
             group.TransitionTo(TradeState.InFlight, 1);
         });
 
@@ -171,12 +178,13 @@ public class ZeroAllocationTests
         ledger.OnBalance(btc, 1m, 0);
         AssertZeroAlloc("InventoryLedger", () =>
         {
-            ev++;
+            ev += 2;
             ledger.TryReservePair(usdt, 600m, btc, 0.01m, out ReservationHandle a, out ReservationHandle b);
             ledger.MarkTerminal(a, ev, 0);
             ledger.MarkTerminal(b, ev, 0);
-            ledger.OnBalance(usdt, 10_000m, ev);
-            ledger.OnBalance(btc, 1m, ev);
+            ledger.OnBalance(usdt, 10_000m, ev + 1); // strictly later balance releases (R-06)
+            ledger.OnBalance(btc, 1m, ev + 1);
+            ledger.FlagUnsettled(0, 5_000_000);
         });
         Assert.Equal(0, ledger.ActiveReservations);
     }
@@ -184,7 +192,7 @@ public class ZeroAllocationTests
     [Fact]
     public void Parsing_And_Ids()
     {
-        var gen = new SnowflakeIdGenerator(1, SystemClock.Instance);
+        var gen = new SnowflakeIdGenerator(1, SystemClock.Instance, resumeAfterUnixMs: 0);
         byte[] buffer = new byte[32];
         AssertZeroAlloc("Snowflake+ClientOrderId", () => ClientOrderId.TryFormat(gen.Next(), buffer, out _));
         AssertZeroAlloc("Utf8Decimal+Grid", () =>

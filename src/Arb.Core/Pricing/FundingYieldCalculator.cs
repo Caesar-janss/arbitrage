@@ -50,6 +50,13 @@ public readonly struct FundingGate
     public double MaxLeverage { get; init; }
 
     public double MinEntryLiqDistanceBps { get; init; }
+
+    /// <summary>All limits finite, break-even / leverage / liq distance &gt; 0 (a NaN limit must never mean "no limit", R-18).</summary>
+    public bool IsValid =>
+        double.IsFinite(MaxBreakEvenHours) && MaxBreakEvenHours > 0
+        && double.IsFinite(MinNetApr)
+        && double.IsFinite(MaxLeverage) && MaxLeverage >= 1
+        && double.IsFinite(MinEntryLiqDistanceBps) && MinEntryLiqDistanceBps > 0;
 }
 
 public enum FundingVerdict : byte
@@ -118,13 +125,16 @@ public static class FundingYieldCalculator
 
     public static FundingEvaluation Evaluate(in FundingInputs x, in FundingGate gate, double entryLiqDistanceBps)
     {
+        // every input and limit finite (R-18): +∞ hold made NetApr NaN and still entered; NaN limits passed `>=`/`<`
         bool valid = x.Strategy.IsFunding()
-            && x.ExpectedHoldHours > 0
-            && x.Leverage > 0
-            && x.NotionalQuote > 0
-            && x.Costs.RoundTrip >= 0
-            && !double.IsNaN(x.LongLegHourlyRate)
-            && !double.IsNaN(x.ShortLegHourlyRate);
+            && gate.IsValid
+            && double.IsFinite(x.ExpectedHoldHours) && x.ExpectedHoldHours > 0
+            && double.IsFinite(x.Leverage) && x.Leverage > 0
+            && double.IsFinite(x.NotionalQuote) && x.NotionalQuote > 0
+            && double.IsFinite(x.Costs.RoundTrip) && x.Costs.RoundTrip >= 0
+            && double.IsFinite(x.LongLegHourlyRate)
+            && double.IsFinite(x.ShortLegHourlyRate);
+        // entryLiqDistanceBps: +∞ = cannot be liquidated (allowed); NaN is rejected by the NaN-safe liquidation gate below
         if (!valid)
         {
             return new FundingEvaluation { Verdict = FundingVerdict.RejectInvalidInput };
@@ -142,24 +152,25 @@ public static class FundingYieldCalculator
         double capitalApr = netApr * x.NotionalQuote / capital;
         double expectedNet = ((g * t) - c) * x.NotionalQuote;
 
+        // every gate written as "!(value within limit)": a NaN anywhere rejects instead of passing
         FundingVerdict verdict;
-        if (g <= 0)
+        if (!(g > 0))
         {
             verdict = FundingVerdict.RejectNonPositiveCarry;
         }
-        else if (breakEven >= gate.MaxBreakEvenHours)
+        else if (!(breakEven < gate.MaxBreakEvenHours))
         {
             verdict = FundingVerdict.RejectBreakEven;
         }
-        else if (expectedNet <= 0)
+        else if (!(expectedNet > 0))
         {
             verdict = FundingVerdict.RejectNegativeExpectedPnl;
         }
-        else if (netApr < gate.MinNetApr)
+        else if (!(netApr >= gate.MinNetApr))
         {
             verdict = FundingVerdict.RejectYield;
         }
-        else if (x.Leverage > gate.MaxLeverage)
+        else if (!(x.Leverage <= gate.MaxLeverage))
         {
             verdict = FundingVerdict.RejectLeverage;
         }
