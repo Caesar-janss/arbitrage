@@ -10,30 +10,36 @@ bukti dijadikan test xUnit yang gagal sebelum fix (syarat `TEAM_WORKFLOW.md` §5
 yang tercatat gagal sebelum fix dan lulus sesudahnya (`docs/review/stage1/REGRESSION_LOG.md`), (2) C-01/C-02 sudah
 ditriase, (3) review Gemini masuk dan ditriase, (4) Jansen menyetujui secara eksplisit. Patch v0.3 tidak mengubah status ini.
 
+Progres syarat penutupan (2026-10-27): (1) **terpenuhi** untuk Claude-R (semua S1/S2 + S3/S4 juga); (2) **belum**: isi
+C-01/C-02 belum diterima; (3) **belum**: Gemini; (4) **belum**. Versi untuk ronde review berikutnya: v0.3,
+`make_review_packet.py --version` = `51fbff899cf6`.
+
 Detail tiap temuan Claude-R: `docs/review/stage1/R_claude-r.md`. ChatGPT: lihat bagian di bawah. Gemini: menunggu.
 
-| ID | Sev | Area | Klaim (ringkas) | Status | Bukti triase | Batch fix |
-|---|---|---|---|---|---|---|
-| R-01 | S1 | MarginGuard / Liquidation | per posisi vs equity cross bersama | CONFIRMED | P11 dijalankan ulang; hitung manual 1545 bps = **zona Warn** (label "Reduce" di laporan awal salah, dikoreksi) | A |
-| R-02 | S1 | Repair PerpHedge + state | hedge perp → REPAIRED terminal, kaki terbuka tanpa pemilik | CONFIRMED | P18 | A |
-| R-10 | S2 | State machine C#+SQL | tidak ada jalur likuidasi/ADL & partial reduce | CONFIRMED | P06 | A |
-| R-03 | S2 | SpatialArbPricer | haircut tidak dipakai di limit/VWAP/edge | CONFIRMED | P01 | B |
-| R-04 | S2 | OrderBookL2 | Mark* dari thread lain merusak parity seqlock | CONFIRMED | P12, P22 | B |
-| R-05 | S2 | OrderBookL2 (ARM64) | urutan store writer di ARM64 | NEEDS-DATA | Pemilik: Jansen (runner ARM64/Graviton) + `DOTNET_JitDisasm`. Mitigasi defensif (`MemoryBarrier` setelah increment) tetap dipasang | B |
-| R-07 | S2 | StaleDataGuard | book beku 4,9 s lolos; latency negatif lolos | CONFIRMED | P08 | B |
-| R-08 | S2 | Registry.Replace | ganti grid dengan key sama → depth fantom | CONFIRMED | P15, P19 | B |
-| R-09 | S2 | WalletStatus | NetworkId 0 = wildcard | CONFIRMED | P04 | B |
-| R-06 | S2 | InventoryLedger | ExpireSettled / ms sama → overstated | CONFIRMED | P07. Klaim `STAGE1_CORE` §3.9 salah, dikoreksi | C |
-| R-11 | S3 | SanityGuard | cap per evaluasi menguras 99,8% | CONFIRMED | P03 | C |
-| R-12 | S3 | SanityGuard | ReferencePx 0/NaN fail-open | CONFIRMED | P02 | C |
-| R-13 | S3 | RepairPlanner | repair buy tanpa gross-up fee base | CONFIRMED | P09 | C |
-| R-18 | S3 | Funding gate | NaN/∞ fail-open | CONFIRMED | P05 | C |
-| R-19 | S3 | SpatialArbPricer | dust dinilai di venue yang salah | CONFIRMED | P21 | C |
-| R-14 | S3 | flat/dust (C# ↔ SQL) | tiga definisi flat | CONFIRMED | P13, P21 | D |
-| R-15 | S3 | opportunity row | reject tidak bisa disimpan | CONFIRMED | P20 | D |
-| R-16 | S3 | capture ratio | basis expected ≠ realized | CONFIRMED | db/tests trade 1001 | D |
-| R-17 | S3 | Snowflake | ID duplikat setelah restart + jam mundur | CONFIRMED | P16 | D |
-| R-20 | S4 | tests | test lulus karena alasan salah / kasus hilang | CONFIRMED | daftar (a)–(f) di laporan | D |
+| ID | Sev | Area | Klaim (ringkas) | Status | Bukti triase | Batch | Fix v0.3 (regression test dulu) |
+|---|---|---|---|---|---|---|---|
+| R-01 | S1 | MarginGuard / Liquidation | per posisi vs equity cross bersama | CONFIRMED | P11 dijalankan ulang; hitung manual 1545 bps = **zona Warn** (label "Reduce" di laporan awal salah, dikoreksi) | A | `bf02647` |
+| R-02 | S1 | Repair PerpHedge + state | hedge perp → REPAIRED terminal, kaki terbuka tanpa pemilik | CONFIRMED | P18 | A | `e985185` |
+| R-10 | S2 | State machine C#+SQL | tidak ada jalur likuidasi/ADL & partial reduce | CONFIRMED | P06 | A | `1fca29c` |
+| R-03 | S2 | SpatialArbPricer | haircut tidak dipakai di limit/VWAP/edge | CONFIRMED | P01 | B | `e926aab + 1fec277` |
+| R-04 | S2 | OrderBookL2 | Mark* dari thread lain merusak parity seqlock | CONFIRMED | P12, P22 | B | `7ce6929` |
+| R-05 | S2 | OrderBookL2 (ARM64) | urutan store writer di ARM64 | **REJECTED (data)** | Job CI `seqlock-arm64` di `ubuntu-24.04-arm`: JIT .NET 8 memakai `ldaddal` dengan register tujuan nyata (acquire + release), bukan `staddl`/`xzr`, baik di kode v0.2 maupun v0.3; stress 20/20. Fence defensif yang semula direncanakan **tidak dipasang** (redundan menurut data). Jansen boleh membuka ulang | B | `df8d55e, 93a5e69` |
+| R-07 | S2 | StaleDataGuard | book beku 4,9 s lolos; latency negatif lolos | CONFIRMED | P08 | B | `962ce64` |
+| R-08 | S2 | Registry.Replace | ganti grid dengan key sama → depth fantom | CONFIRMED | P15, P19 | B | `f0a38fe` |
+| R-09 | S2 | WalletStatus | NetworkId 0 = wildcard | CONFIRMED | P04 | B | `e983074` |
+| R-06 | S2 | InventoryLedger | ExpireSettled / ms sama → overstated | CONFIRMED | P07. Klaim `STAGE1_CORE` §3.9 salah, dikoreksi | C | `eb3e116 + 1e629bf` |
+| R-11 | S3 | SanityGuard | cap per evaluasi menguras 99,8% | CONFIRMED | P03 | C | `3ff92c3` |
+| R-12 | S3 | SanityGuard | ReferencePx 0/NaN fail-open | CONFIRMED | P02 | C | `7a014b0` |
+| R-13 | S3 | RepairPlanner | repair buy tanpa gross-up fee base | CONFIRMED | P09 | C | `e8877e0` |
+| R-18 | S3 | Funding gate | NaN/∞ fail-open | CONFIRMED | P05 | C | `2f42151` |
+| R-19 | S3 | SpatialArbPricer | dust dinilai di venue yang salah | CONFIRMED | P21 | C | `884c988` |
+| R-14 | S3 | flat/dust (C# ↔ SQL) | tiga definisi flat | CONFIRMED | P13, P21 | D | `c60c5af` |
+| R-15 | S3 | opportunity row | reject tidak bisa disimpan | CONFIRMED | P20 | D | `5c1f6db` |
+| R-16 | S3 | capture ratio | basis expected ≠ realized | CONFIRMED | db/tests trade 1001 | D | `1733bf4` |
+| R-17 | S3 | Snowflake | ID duplikat setelah restart + jam mundur | CONFIRMED | P16 | D | `7f92fbf` |
+| R-20 | S4 | tests | test lulus karena alasan salah / kasus hilang | CONFIRMED | daftar (a)–(f) di laporan | D | `e6e1386` |
+
+Bukti merah/hijau tiap baris: `docs/review/stage1/REGRESSION_LOG.md`. Semua fix ada di draft PR #2 (`stage1/review-r1`).
 
 **Batch fix (v0.3):**
 - **A**: risiko eksposur: margin level akun + lifecycle hedge + transisi baru (migrasi `V007`).
@@ -59,14 +65,16 @@ dibandingkan dengan R-xx saat file diterima (jika ternyata berbeda substansi, st
 ### Koreksi atas klaim Claude sendiri (dari ronde ini)
 - `STAGE1_CORE` §3.9 "available tidak pernah overstated": **salah** (R-06).
 - §3.6 menyarankan cross margin di akun strategi tanpa menyebut prasyarat "satu posisi per akun". Model per posisi tidak aman untuk multi-pair (R-01).
-- §4 "seqlock benar": hanya terbukti untuk **single writer di x64** (R-04, R-05).
+- §4 "seqlock benar": hanya terbukti untuk **single writer** (R-04). Untuk ARM64 kini ada data (R-05): benar di .NET 8.
+- Rencana "fence defensif R-05 tetap dipasang" (versi awal log ini) dibatalkan setelah data ARM64 masuk; alasan di
+  `REGRESSION_LOG.md` §R-05.
 - Laporan R-01 menulis 1545 bps sebagai "zona Reduce": **salah**, yang benar zona Warn (1500 < 1545 ≤ 2500). Ditandai
   reviewer ChatGPT. Lolos dari cek ulang Claude karena yang dicek hanya angkanya, bukan labelnya.
 
 ### Statistik reviewer
 | Reviewer | Dilaporkan | Unik (baru) | DUPLICATE | CONFIRMED | REJECTED | NEEDS-DATA | Menunggu triase | Precision (unik yang terputus) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Claude-R | 20 | 20 | 0 | 19 | 0 | 1 | 0 | 100% (19/19) |
+| Claude-R | 20 | 20 | 0 | 19 | 1 (R-05, data ARM64) | 0 | 0 | 95% (19/20) |
 | ChatGPT | 6 | ≤ 2 | 4 | 0 | 0 | 0 | 2 | — (belum ada yang terputus) |
 | Gemini | — | | | | | | | |
 

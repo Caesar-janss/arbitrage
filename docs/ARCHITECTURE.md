@@ -154,7 +154,7 @@ ArbEngine/
 │       └── appsettings.json · appsettings.Paper.json · appsettings.Live.json   # secrets via env, BUKAN di sini
 │
 ├── db/
-│   ├── migrations/V001…V006             # skema (tervalidasi)
+│   ├── migrations/V001…V007             # skema (tervalidasi; V007 = fix review ronde 1)
 │   └── tests/                           # skenario + integrity test (95 assertion)
 │
 └── tests/
@@ -195,15 +195,19 @@ Engine **tidak** mereferensikan adapter venue mana pun → strategi tidak bisa b
 ```
 CREATED ─► IN_FLIGHT ─┬─► COMPLETED (spatial)            terminal
    │                  ├─► MISSED                         terminal
-   └─► MISSED         ├─► POSITION_OPEN ─► EXITING ─► CLOSED (funding)
+   └─► MISSED         ├─► POSITION_OPEN ⇄ EXITING ─► CLOSED (funding; EXITING → POSITION_OPEN = partial reduce)
                       ├─► RESIDUAL ─► REPAIRING ─┬─► REPAIRED / POSITION_OPEN / CLOSED
                       └─► STUCK ◄────────────────┴─► RESIDUAL (repair parsial)
                           STUCK ─► REPAIRING | MANUAL_RESOLVED
+   POSITION_OPEN ─► RESIDUAL (satu kaki dilikuidasi / ADL) | STUCK (venue tak terjangkau)        [v0.3, R-10]
+   SPATIAL: REPAIRING ─► POSITION_OPEN hanya untuk hedge perp; hedge tidak pernah REPAIRED        [v0.3, R-02]
 ```
 
-- Tabel transisi di `trd.trade_state_transition` ≡ `TradeStateMachine.cs`. Unit test membaca keduanya dan memastikan identik.
+- Tabel transisi di `trd.trade_state_transition` (V002 + V007, 23 transisi) ≡ `TradeStateMachine.cs`. Unit test membaca semua migrasi dan memastikan identik.
+- **State terminal mensyaratkan eksposur nol (v0.3):** tidak ada posisi perp terbuka, dan net delta = dust yang diterima eksplisit (`dust_accepted_base`). Aturan yang sama dipakai `rpt.v_trade_ledger.is_flat` (R-14).
 - **Repair decision (RepairPlanner):** hitung expected cost real-time dari book saat ini untuk:
   (a) *complete* kaki yang kurang di venue B, (b) *unwind* di venue A, (c) *hedge* di perp paling likuid lalu unwind santai.
+  Hedge (c) punya pemilik: trade tetap `POSITION_OPEN` sampai spot + perp di-unwind (`EXITING → CLOSED`), terlihat di `rpt.v_open_exposure.open_perp_qty_base` (v0.3, R-02).
   Pilih termurah dengan batas `MaxStopLossBps`. Order repair = **marketable-limit IOC** (limit = VWAP + toleransi), ladder 2–3 langkah, bukan market order murni (market order di book tipis = slippage tak terbatas).
 - **Deadline:** RESIDUAL → flat ≤ 500 ms (SLO, diukur di `rpt.v_legging_incidents`). Lewat batas / percobaan habis → `STUCK` → halt GLOBAL `NO_NEW_ENTRIES` + alert.
 - **Halt levels:** `NO_NEW_ENTRIES` menghentikan entry tetapi **tidak pernah** memblok repair/unwind. `FLATTEN_AND_STOP` aktif menutup semua eksposur. Kill-switch yang mematikan segalanya saat satu kaki terbuka = eksposur telanjang.
@@ -213,8 +217,8 @@ CREATED ─► IN_FLIGHT ─┬─► COMPLETED (spatial)            terminal
 **Stale-data guard (lebih ketat dari "exchangeTs vs localTs > 150 ms"):**
 1. *Integrity dulu:* seq gap / checksum gagal → book `Invalid` → freeze pasangan → resync. Book korup dengan timestamp segar lebih berbahaya dari book basi.
 2. *Clock:* host wajib chrony/NTP; `ClockOffsetEstimator` per venue. Latency = `localRecv − (exchangeTs + offset)`. Tanpa koreksi offset, ambang 150 ms membandingkan dua jam yang berbeda.
-3. *Age:* umur sejak pesan terakhir per book, plus liveness koneksi (ping RTT). Instrumen sepi ≠ basi → ambang per instrumen dari cadence normalnya.
-4. *Cross-book skew:* kedua book yang dibandingkan harus "segar bersamaan".
+3. *Age:* umur sejak pesan terakhir per book, plus liveness koneksi (ping RTT). Instrumen sepi ≠ basi → ambang per instrumen dari cadence normalnya. v0.3: batas umur per strategi (`BookTooOld`; spatial 1 s, funding 5 s).
+4. *Cross-book skew:* kedua book yang dibandingkan harus "segar bersamaan" (v0.3: `PairSkew`, spatial 500 ms). Latency negatif di luar ketidakpastian jam = `ClockUncertain` (R-07).
 5. *Cadence venue:* stream depth JSON Binance spot di-batch (100 ms); gunakan SBE `@depth` (20 ms) + `@bestBidAsk` (real-time) agar ambang 150 ms bermakna.
 
 ---
@@ -327,7 +331,7 @@ Satu error membatalkan satu transaksi → transisi state ditulis per-statement (
 | `trd` | engine_run, opportunity (partisi harian), trade_state(+transition), trade_group, trade_state_log, order_leg, fill, funding_payment | log keputusan → eksekusi → audit state |
 | `acct` | balance_snapshot, reconciliation, transfer, equity_snapshot | saldo, drift, biaya rebalancing aktual |
 | `risk` | halt_state, risk_event, `fn_consecutive_losses`, `fn_daily_pnl`, `fn_evaluate_circuit_breaker`, `fn_latch_halt`, `fn_clear_halt`, `v_active_halts` | latch persisten & rehydration |
-| `rpt` | v_leg_exec, v_trade_ledger, v_daily_pnl, v_execution_quality, v_opportunity_funnel, v_legging_incidents, v_funding_positions, v_inventory, v_open_exposure, v_order_integrity | analitik PnL & kualitas eksekusi |
+| `rpt` | v_leg_exec, v_trade_ledger, v_daily_pnl, v_execution_quality, v_opportunity_funnel, v_legging_incidents, v_funding_positions, v_inventory, v_open_exposure, v_order_integrity, v_rebalance_cost_daily (v0.3) | analitik PnL & kualitas eksekusi |
 
 Model PnL (satu rumus untuk spatial, perp, spot-perp):
 ```

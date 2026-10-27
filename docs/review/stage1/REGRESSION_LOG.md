@@ -450,3 +450,17 @@ karena alasan lain (→ helper `expect_error_like`).
 - **Patch**: `ToDbCode` untuk `Side`, `OrderType`, `TimeInForce`, `RepairMethod` (+ `Manual`); `StripSqlComments` di semua
   test kontrak.
 - **HIJAU**: `R20_EnumDbContractTests 4 passed`, `R20_OptimizerBruteForceTests 3 passed`; full suite `246 passed, 0 failed`.
+
+---
+
+## Ringkasan ronde 1 (v0.3)
+
+| | Jumlah |
+|---|---:|
+| Temuan Claude-R | 20 (19 CONFIRMED + di-fix, 1 REJECTED berdasarkan data: R-05) |
+| Merah dicatat sebelum patch | 19 temuan (perilaku pada API lama bila bisa diekspresikan, compile bila API baru; R-20 f via mutation) |
+| Test C# | 150 (v0.2) → **250** (v0.3), harness offline 250/250 |
+| DB | `ALL TESTS PASSED`, assertion PASS 95 → 119 (blok regression di-rollback) |
+| Benchmark | semua **0 B/op**; latency setara v0.2 dalam noise container (§4.3a STAGE1_CORE) |
+| Temuan sampingan saat menulis test | 3: test kontrak menghitung SQL yang di-comment-out; assert SQL R-02 lulus karena alasan lain; brute-force R-20 versi pertama tidak menangkap mutan apa pun |
+| Belum | C-01/C-02 (isi belum diterima), review Gemini, persetujuan Jansen → **Tahap 1 tetap REVIEW TERBUKA** |

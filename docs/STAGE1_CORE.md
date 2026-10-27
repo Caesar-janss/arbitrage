@@ -209,7 +209,12 @@ padahal 0,02 BTC). v0.3: rilis hanya oleh event *strictly later*; timeout memang
 > 2. Source test & benchmark **asli** di-compile apa adanya terhadap shim yang meniru signature xunit 2.9 / BDN 0.14 yang dipakai, lalu dijalankan dengan runner reflection.
 > 3. **Konfirmasi final tetap `dotnet test` / `dotnet run` asli di mesin Anda.** Risiko residual: perbedaan kecil overload/analyzer xUnit (test project tidak memakai warnings-as-errors agar warning analyzer tidak memblok).
 
-### 4.1 Test: 150/150 lulus (Debug ×5, Release ×5, stabil)
+### 4.0 v0.3: 250/250 lulus (harness offline) + CI xUnit asli
+v0.3 menambah 100 test: regression test per temuan di `tests/Arb.Core.Tests/Regression/` (R01…R20), dan test lama yang
+API-nya berubah disesuaikan (lihat `review/stage1/REGRESSION_LOG.md`). DB: `db/tests/test_schema.sql` + blok
+`REGRESSION v0.3` (di-rollback), `ALL TESTS PASSED`. Tabel 4.1 di bawah adalah baseline v0.2.
+
+### 4.1 Test v0.2: 150/150 lulus (Debug ×5, Release ×5, stabil)
 | Kelas | Case | Kelas | Case |
 |---|---:|---|---:|
 | FixedPointTests | 31 | RepairPlannerTests | 9 |
@@ -239,13 +244,32 @@ Beberapa sengaja identik dengan skenario `db/tests` (opp 501, trade 1001/1002) s
 | M7 multiplier diabaikan di harga canonical | 1000PEPE ×5 |
 | M8 hurdle diabaikan | Optimizer hurdle |
 
+v0.3 (R-20): empat mutan optimizer tambahan (hurdle diabaikan, haircut diabaikan, cap notional dihitung pakai bid,
+cap level +1) **lolos** brute-force test v0.2 dan **tertangkap** `R20_OptimizerBruteForceTests`; mutasi tabel transisi lewat
+komentar SQL dan mutasi CHECK enum tertangkap test kontrak baru.
+
 **RCA flaky test yang ditemukan dan diperbaiki:** versi awal test seqlock (loop jumlah pesan tetap) sesekali
 gagal di syarat "≥100 read tervalidasi". Stress 600 ronde: **0 torn read**. Penyebabnya bukan seqlock:
 writer selesai sebelum thread reader terjadwal, ditambah reader kelaparan oleh writer tanpa jeda (5% ronde
 gagal, 39% di bawah tekanan GC). Test diubah ke berbasis durasi + start barrier + jeda writer realistis.
 Stress ulang: 124 juta read tervalidasi, minimum 173 ribu per ronde, 0 torn.
 
-### 4.3 Alokasi & latency (harness offline, container 2 vCPU, .NET 8.0.132)
+### 4.3a v0.3 vs v0.2, A/B berurutan di container yang sama (min dari 2 run, ns/op)
+Container ini berisik: `CrossedBookOptimizer` (kode **tidak berubah**) terukur 246 vs 411 ns di dua build. Angka
+ini hanya untuk melihat regresi besar; **semua benchmark 0 B/op** (yang ini exact).
+
+| Benchmark | v0.2 | v0.3 | Catatan |
+|---|---:|---:|---|
+| OrderBookL2.ApplyDelta | 182 | 180 | + cek request flag (R-04) |
+| OrderBookL2.TryCopyTo | 57 | 50 | |
+| SpatialArbPricer.Evaluate | 661 | 550 | walk dengan haircut (R-03) memakai aritmetika 64-bit |
+| RepairPlanner.Plan | 186 | 193 | |
+| SanityGuard.Evaluate | 25 | 33 | cek budget/ref px (R-11/R-12) |
+| StaleDataGuard.Check | 7 | 9 | cek umur & latency negatif (R-07) |
+| InventoryLedger cycle | 595 | 865 | benchmark diperbaiki: saldo strictly later (R-06); dalam rentang noise |
+| MarginGuard.EvaluateAccount | – | (zero-alloc test) | bisection, bukan hot path per tick |
+
+### 4.3 Alokasi & latency v0.2 (harness offline, container 2 vCPU, .NET 8.0.132)
 | Benchmark | ns/op (median, indikatif) | B/op |
 |---|---:|---:|
 | OrderBookL2.ApplyDelta (10 level, book 200) | 123 | 0 |
@@ -288,8 +312,9 @@ wire→decision (< 50 µs) aman dengan margin dua orde. Hot path tetap jauh lebi
 ---
 
 ## 6. Masukan untuk Tahap 2
+- **v0.3:** kewajiban host per temuan ada di tabel §0 (kolom "Kewajiban host").
 - Adapter perlu memetakan nama network venue → `NetworkId` canonical (ERC20/ETH/…).
 - `BookStamp.ExchangeUnixMicros` wajib dari timestamp venue, `LocalRecvUnixMicros` dari jam host ber-chrony.
 - `ClockOffsetEstimator` (Venues.Common) menghasilkan `VenueClock` untuk `StaleDataGuard`.
-- Synchronizer snapshot/delta memanggil `MarkInvalid(SequenceGap)` → `ApplySnapshot` (Bitget: CRC32 via `CopyTopFromWriterThread`).
+- Synchronizer snapshot/delta memanggil `MarkInvalid(SequenceGap)` → `ApplySnapshot(…, spec.GridGeneration)` (Bitget: CRC32 via `CopyTopFromWriterThread`). `MarkInvalid` boleh dari thread mana pun (R-04).
 - `InventoryLedger.OnBalance` butuh event time venue (Binance `u`, Bybit `creationTime`, Bitget `ts`).
