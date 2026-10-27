@@ -31,6 +31,17 @@ public sealed record RiskLimits
 
     public double MaxClockUncertaintyMs { get; init; } = 20;
 
+    /// <summary>Spatial prices both books NOW: each must have been updated within this (R-07).</summary>
+    public double MaxSpatialBookAgeMs { get; init; } = 1_000;
+
+    /// <summary>Spatial: max receive-time skew between the two books.</summary>
+    public double MaxSpatialPairSkewMs { get; init; } = 500;
+
+    /// <summary>Funding entry/exit tolerates quieter books (hold time is hours).</summary>
+    public double MaxFundingBookAgeMs { get; init; } = 5_000;
+
+    public double MaxFundingPairSkewMs { get; init; } = 2_000;
+
     // ── Sizing / edge ──────────────────────────────────────────────────────────
     public double MaxNotionalPerTradeQuote { get; init; } = 500;
 
@@ -99,6 +110,10 @@ public sealed record RiskLimits
         Require(MaxExchangeLatencyMs > 0, "MaxExchangeLatencyMs > 0");
         Require(MaxBookSilenceMs > 0 && MaxConnectionSilenceMs > 0, "silence limits > 0");
         Require(MaxClockUncertaintyMs > 0 && MaxClockUncertaintyMs < MaxExchangeLatencyMs, "0 < MaxClockUncertaintyMs < MaxExchangeLatencyMs");
+        Require(MaxSpatialBookAgeMs > 0 && MaxSpatialBookAgeMs <= MaxBookSilenceMs, "0 < MaxSpatialBookAgeMs <= MaxBookSilenceMs");
+        Require(MaxFundingBookAgeMs > 0 && MaxFundingBookAgeMs <= MaxBookSilenceMs, "0 < MaxFundingBookAgeMs <= MaxBookSilenceMs");
+        Require(MaxSpatialPairSkewMs > 0 && MaxSpatialPairSkewMs <= MaxSpatialBookAgeMs, "0 < MaxSpatialPairSkewMs <= MaxSpatialBookAgeMs");
+        Require(MaxFundingPairSkewMs > 0 && MaxFundingPairSkewMs <= MaxFundingBookAgeMs, "0 < MaxFundingPairSkewMs <= MaxFundingBookAgeMs");
         Require(MaxNotionalPerTradeQuote > 0, "MaxNotionalPerTradeQuote > 0");
         Require(MinProfitQuote >= 0, "MinProfitQuote >= 0");
         Require(MinMarginalEdgeBps >= 0, "MinMarginalEdgeBps >= 0");

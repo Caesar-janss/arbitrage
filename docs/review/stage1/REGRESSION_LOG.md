@@ -160,3 +160,22 @@ di sandbox; lihat `STAGE1_CORE.md` §7). CI GitHub menjalankan xUnit asli pada c
   milik section itu sendiri (tidak membaca ulang); `BeginWrite` memulihkan paritas bila menemukan versi ganjil
   (`ParityRepairs`, seharusnya selalu 0).
 - **HIJAU**: `R04_ExternalBookMarksTests 4 passed`; storm 2 × 2.000.000: 3/3 run `4 passed`; full suite `182 passed, 0 failed`.
+
+## R-07 (S2) — book beku 4,9 s lolos, tidak ada cek skew antar-book, latency negatif diterima
+
+- **Test**: `Regression/R07_StaleGuardBehaviourTests.cs` (3, API lama), `Regression/R07_StaleGuardLimitsTests.cs` (4, API baru);
+  skenario P08 dengan `RiskLimits` default.
+- **MERAH (perilaku, API lama)**:
+  ```
+  FAIL …BookFrozen4900ms_WithLiveSocket_IsNotFresh                4.9 s old book on a live socket reported Fresh
+  FAIL …PairWithOneBook4900msOlder_IsNotFresh                     pair skew 4.9 s reported Fresh
+  FAIL …NegativeLatency_BeyondClockUncertainty_IsClockUncertain   Expected: ClockUncertain  Actual: Fresh
+  TOTAL: 0 passed, 3 failed
+  ```
+- **MERAH (compile)**, test batas baru: `No overload for method 'From' takes 2 arguments`, `'Freshness' does not contain a
+  definition for 'BookTooOld'` / `'PairSkew'`, `'RiskLimits' does not contain a definition for 'MaxSpatialBookAgeMs'`.
+- **Patch**: `Freshness.BookTooOld` (umur maks per strategi: spatial 1000 ms, funding 5000 ms) dan `Freshness.PairSkew`
+  (skew terima spatial 500 ms, funding 2000 ms); latency < −(uncertainty + 1 ms resolusi timestamp venue) →
+  `ClockUncertain`; semua perbandingan ditulis NaN-safe (`!(x <= limit)`). `FreshnessLimits.From(limits)` = batas
+  spatial (paling ketat); `From(limits, strategy)` eksplisit. `RiskLimits.Validate` mengecek konsistensi batas baru.
+- **HIJAU**: `R07_StaleGuardBehaviourTests 3 passed`, `R07_StaleGuardLimitsTests 4 passed`; full suite `189 passed, 0 failed`.
