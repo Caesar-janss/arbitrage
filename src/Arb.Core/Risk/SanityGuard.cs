@@ -19,6 +19,9 @@ public enum SanityFlags : ushort
 
     /// <summary>A cap needs ReferencePx (quote → base) but it is missing / not finite / ≤ 0 (R-12: used to skip the cap).</summary>
     ReferencePriceInvalid = 1 << 9,
+
+    /// <summary>Route closed but no <see cref="NonReplenishableBudget"/> was supplied for the wallet it drains (R-11).</summary>
+    BudgetUnknown = 1 << 10,
 }
 
 public readonly struct SanityInput
@@ -40,6 +43,12 @@ public readonly struct SanityInput
 
     /// <summary>Reference price to convert the quote cap into base units.</summary>
     public double ReferencePx { get; init; }
+
+    /// <summary>Base route closed: budget of the SELL venue's base wallet since the route closed (<see cref="RouteBudgetTracker"/>).</summary>
+    public NonReplenishableBudget SellVenueBaseBudget { get; init; }
+
+    /// <summary>Quote route closed: budget (in quote) of the BUY venue's quote wallet since the route closed.</summary>
+    public NonReplenishableBudget BuyVenueQuoteBudget { get; init; }
 }
 
 public readonly struct SanityLimits
@@ -90,8 +99,9 @@ public readonly struct SanityResult
 ///   * SPOT-SPOT spatial: coins bought on A must be movable A→B (withdraw A ∧ deposit B on a common network),
 ///     USDT B→A likewise. A closed route is the classic trap: spreads open BECAUSE nobody can move coins.
 ///       - route closed/unknown AND edge &gt; WalletClosedMaxEdgeBps → reject (SuspectedWalletTrap)
-///       - route closed/unknown AND normal edge → allowed only on pre-positioned inventory, capped at a fraction
-///         of it (it cannot be replenished until the wallet reopens)
+///       - route closed/unknown AND normal edge → allowed only on pre-positioned inventory: CUMULATIVELY at most a
+///         fraction of what the wallet held when the route closed (<see cref="NonReplenishableBudget"/>), because it cannot
+///         be replenished until the wallet reopens; no budget supplied → RejectInventory (fail closed)
 ///   * any leg perp (perp-perp, spot-perp): no coin transfer needed → coin wallet status ignored.
 /// </summary>
 public static class SanityGuard
@@ -147,7 +157,12 @@ public static class SanityGuard
 
         if (!baseRoute.IsOpen)
         {
-            cap = Math.Min(cap, Math.Max(0, x.SellVenueBaseInventory) * limits.NonReplenishableFraction);
+            if (!x.SellVenueBaseBudget.IsKnown)
+            {
+                return BudgetUnknown(flags, baseRoute, quoteRoute);
+            }
+
+            cap = Math.Min(cap, Math.Min(Math.Max(0, x.SellVenueBaseInventory), x.SellVenueBaseBudget.Remaining(limits.NonReplenishableFraction)));
         }
 
         if (!quoteRoute.IsOpen)
@@ -164,7 +179,13 @@ public static class SanityGuard
                 };
             }
 
-            cap = Math.Min(cap, Math.Max(0, x.BuyVenueQuoteInventory) * limits.NonReplenishableFraction / x.ReferencePx);
+            if (!x.BuyVenueQuoteBudget.IsKnown)
+            {
+                return BudgetUnknown(flags, baseRoute, quoteRoute);
+            }
+
+            double quoteCap = Math.Min(Math.Max(0, x.BuyVenueQuoteInventory), x.BuyVenueQuoteBudget.Remaining(limits.NonReplenishableFraction));
+            cap = Math.Min(cap, quoteCap / x.ReferencePx);
         }
 
         if (!double.IsPositiveInfinity(cap))
@@ -187,6 +208,15 @@ public static class SanityGuard
         RouteStatus.Open => SanityFlags.None,
         RouteStatus.Closed => closed,
         _ => unknown,
+    };
+
+    private static SanityResult BudgetUnknown(SanityFlags flags, in TransferRoute baseRoute, in TransferRoute quoteRoute) => new()
+    {
+        Decision = RejectReason.RejectInventory,
+        Flags = flags | SanityFlags.BudgetUnknown,
+        QtyCapCanon = 0,
+        BaseRoute = baseRoute,
+        QuoteRoute = quoteRoute,
     };
 
     private static SanityResult Reject(SanityFlags flags) => new()

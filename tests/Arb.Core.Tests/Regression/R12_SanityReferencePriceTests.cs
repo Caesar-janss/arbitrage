@@ -36,6 +36,7 @@ public class R12_SanityReferencePriceTests
         SellVenueBaseInventory = 0.2,
         BuyVenueQuoteInventory = 12_000,
         ReferencePx = refPx,
+        BuyVenueQuoteBudget = new NonReplenishableBudget(12_000, 0),
     };
 
     [Theory]

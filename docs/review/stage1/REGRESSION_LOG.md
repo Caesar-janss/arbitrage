@@ -271,3 +271,22 @@ jadi datanya dikumpulkan di CI: job manual `seqlock-arm64` (`df8d55e`) = listing
 - **Patch**: `SanityGuard`: bila route quote tidak Open dan `ReferencePx` tidak finite atau ≤ 0 → `RejectSanity` +
   `SanityFlags.ReferencePriceInvalid`, cap 0.
 - **HIJAU**: `R12_SanityReferencePriceTests 5 passed`; full suite `209 passed, 0 failed`.
+
+## R-11 (S3) — cap inventory non-replenishable dihitung dari sisa per evaluasi → 22 trade menguras 99,8 %
+
+- **Test**: `Regression/R11_NonReplenishableCapInvariantTests.cs` (1, API lama: invarian ≤ 25 %),
+  `Regression/R11_RouteBudgetTrackerTests.cs` (2, API baru), skenario P03.
+- **MERAH (perilaku)**:
+  ```
+  FAIL …RepeatedTradesAtTheCap_NeverConsumeMoreThanTheFraction
+      consumed 100.00 % of the non-replenishable inventory (limit 25 %)
+  TOTAL: 0 passed, 1 failed
+  ```
+- **MERAH (compile)**: `The type or namespace name 'RouteBudgetTracker' could not be found`, `'SanityInput' does not contain a
+  definition for 'SellVenueBaseBudget'`, `'NonReplenishableBudget' could not be found`, `'SanityFlags' … 'BudgetUnknown'`.
+- **Patch**: `Risk/RouteBudget.cs`: `NonReplenishableBudget` (snapshot saat route tutup + pemakaian kumulatif) dan
+  `RouteBudgetTracker` (Open → reset; pertama kali tidak Open → snapshot; `RecordUse` setelah fill). `SanityGuard`: cap =
+  min(inventory sekarang, fraksi × snapshot − terpakai); budget tidak diberikan → `RejectInventory` + `BudgetUnknown`
+  (fail-closed). Test sanity lama memberi budget eksplisit (snapshot = inventory sekarang → cap sama dengan v0.2 untuk trade pertama).
+- **HIJAU**: `R11_NonReplenishableCapInvariantTests 1 passed`, `R11_RouteBudgetTrackerTests 2 passed` (konsumsi tepat
+  0,05 = 25 % dari 0,2 BTC lalu berhenti); full suite `212 passed, 0 failed`.
