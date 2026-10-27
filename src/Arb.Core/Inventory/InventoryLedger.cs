@@ -34,9 +34,13 @@ public readonly struct ReservationHandle : IEquatable<ReservationHandle>
 /// Available = venueFree − reserved. Reservation lifecycle (conservative — can understate, never overstate):
 ///   TryReserve(…)                    decision taken, before sending
 ///   MarkTerminal(h, venueEventMs)    order reached a terminal state
-///   OnBalance(slot, free, eventMs)   releases every terminal reservation on that slot whose terminal event
-///                                    happened at/before the balance event (the balance now reflects the trade)
-///   ExpireSettled(now, timeout)      safety net if the venue sends no balance update (→ reconcile via REST)
+///   OnBalance(slot, free, eventMs)   releases every terminal reservation on that slot whose terminal event happened
+///                                    STRICTLY before the balance event. Order and wallet events come from different
+///                                    venue services: a balance stamped in the same millisecond may predate the fill
+///                                    (R-06), so "same ms" keeps the reservation.
+///   FlagUnsettled(now, timeout)      no balance event for a terminal reservation within the timeout → flag the slot
+///                                    for a REST reconcile. It does NOT release (that overstated Available, R-06); the
+///                                    reconcile result fed to OnBalance (venue server time) settles it.
 /// While an IOC is in flight the venue may already lock funds AND we still hold the reservation: double
 /// counting in the SAFE direction. Two simultaneous opportunities can never spend the same balance.
 ///
@@ -51,6 +55,7 @@ public sealed class InventoryLedger
     private readonly decimal[] _venueFree;
     private readonly decimal[] _reserved;
     private readonly long[] _lastBalanceEventMs;
+    private readonly int[] _unsettled;
     private readonly Entry[] _entries;
     private readonly int[] _freeStack;
     private int _freeTop;
@@ -70,6 +75,7 @@ public sealed class InventoryLedger
         _reserved = new decimal[slots];
         _lastBalanceEventMs = new long[slots];
         Array.Fill(_lastBalanceEventMs, long.MinValue);
+        _unsettled = new int[slots];
         _entries = new Entry[maxReservations];
         _freeStack = new int[maxReservations];
         for (int i = 0; i < maxReservations; i++)
@@ -98,6 +104,9 @@ public sealed class InventoryLedger
 
     public decimal Available(int slot) => _venueFree[slot] - _reserved[slot];
 
+    /// <summary>True while a terminal reservation on this slot waited longer than the settle timeout (→ REST reconcile).</summary>
+    public bool NeedsReconcile(int slot) => _unsettled[slot] > 0;
+
     /// <summary>Venue-reported FREE balance (excluding venue-side locked) with the venue event time.</summary>
     public void OnBalance(int slot, decimal venueFree, long venueEventMs)
     {
@@ -111,7 +120,7 @@ public sealed class InventoryLedger
         for (int i = 0; i < _entries.Length; i++)
         {
             ref Entry e = ref _entries[i];
-            if (e.Active && e.Terminal && e.Slot == slot && e.TerminalEventMs <= venueEventMs)
+            if (e.Active && e.Terminal && e.Slot == slot && e.TerminalEventMs < venueEventMs)
             {
                 ReleaseAt(i);
             }
@@ -163,7 +172,7 @@ public sealed class InventoryLedger
         return true;
     }
 
-    /// <summary>Order terminal. Released immediately if a balance event at/after this time was already seen.</summary>
+    /// <summary>Order terminal. Released immediately only if a balance event STRICTLY after this time was already seen.</summary>
     public bool MarkTerminal(ReservationHandle handle, long venueEventMs, long nowMonoMicros)
     {
         if (!TryGet(handle, out int index))
@@ -175,7 +184,7 @@ public sealed class InventoryLedger
         e.Terminal = true;
         e.TerminalEventMs = venueEventMs;
         e.TerminalMonoMicros = nowMonoMicros;
-        if (_lastBalanceEventMs[e.Slot] >= venueEventMs)
+        if (_lastBalanceEventMs[e.Slot] > venueEventMs)
         {
             ReleaseAt(index);
         }
@@ -195,16 +204,20 @@ public sealed class InventoryLedger
         return true;
     }
 
-    /// <summary>Release terminal reservations older than the timeout; returns how many (each one should trigger a REST reconcile).</summary>
-    public int ExpireSettled(long nowMonoMicros, long settleTimeoutMicros)
+    /// <summary>
+    /// Flag terminal reservations that no balance event settled within the timeout. Returns how many were NEWLY flagged
+    /// (trigger one REST balance reconcile per affected slot; see <see cref="NeedsReconcile"/>). Never releases.
+    /// </summary>
+    public int FlagUnsettled(long nowMonoMicros, long settleTimeoutMicros)
     {
         int n = 0;
         for (int i = 0; i < _entries.Length; i++)
         {
             ref Entry e = ref _entries[i];
-            if (e.Active && e.Terminal && nowMonoMicros - e.TerminalMonoMicros >= settleTimeoutMicros)
+            if (e.Active && e.Terminal && !e.ReconcileFlagged && nowMonoMicros - e.TerminalMonoMicros >= settleTimeoutMicros)
             {
-                ReleaseAt(i);
+                e.ReconcileFlagged = true;
+                _unsettled[e.Slot]++;
                 n++;
             }
         }
@@ -241,6 +254,11 @@ public sealed class InventoryLedger
     private void ReleaseAt(int index)
     {
         ref Entry e = ref _entries[index];
+        if (e.ReconcileFlagged)
+        {
+            _unsettled[e.Slot]--;
+        }
+
         _reserved[e.Slot] -= e.Amount;
         e = default;
         _freeStack[_freeTop++] = index;
@@ -255,5 +273,6 @@ public sealed class InventoryLedger
         public bool Terminal;
         public long TerminalEventMs;
         public long TerminalMonoMicros;
+        public bool ReconcileFlagged;
     }
 }

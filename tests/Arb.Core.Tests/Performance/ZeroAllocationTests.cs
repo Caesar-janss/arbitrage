@@ -178,12 +178,13 @@ public class ZeroAllocationTests
         ledger.OnBalance(btc, 1m, 0);
         AssertZeroAlloc("InventoryLedger", () =>
         {
-            ev++;
+            ev += 2;
             ledger.TryReservePair(usdt, 600m, btc, 0.01m, out ReservationHandle a, out ReservationHandle b);
             ledger.MarkTerminal(a, ev, 0);
             ledger.MarkTerminal(b, ev, 0);
-            ledger.OnBalance(usdt, 10_000m, ev);
-            ledger.OnBalance(btc, 1m, ev);
+            ledger.OnBalance(usdt, 10_000m, ev + 1); // strictly later balance releases (R-06)
+            ledger.OnBalance(btc, 1m, ev + 1);
+            ledger.FlagUnsettled(0, 5_000_000);
         });
         Assert.Equal(0, ledger.ActiveReservations);
     }

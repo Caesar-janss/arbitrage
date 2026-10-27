@@ -87,16 +87,19 @@ public class InventoryLedgerTests
     }
 
     [Fact]
-    public void SettleTimeout_ReleasesTerminalReservations()
+    public void SettleTimeout_FlagsForReconcile_NeverReleases()
     {
+        // v0.2 released here and asserted Available = 900 — i.e. it codified the R-06 overstatement (R-20 a)
         (InventoryLedger l, int usdtA, _) = Setup();
         Assert.True(l.TryReserve(usdtA, 100m, out ReservationHandle h));
         Assert.True(l.TryReserve(usdtA, 100m, out ReservationHandle open));
         l.MarkTerminal(h, venueEventMs: 1_000, nowMonoMicros: 10_000);
-        Assert.Equal(0, l.ExpireSettled(nowMonoMicros: 1_000_000, settleTimeoutMicros: 5_000_000));
-        Assert.Equal(1, l.ExpireSettled(nowMonoMicros: 6_000_000, settleTimeoutMicros: 5_000_000));
-        Assert.True(l.IsActive(open)); // never expire a non-terminal (in-flight) reservation
-        Assert.Equal(900m, l.Available(usdtA));
+        Assert.Equal(0, l.FlagUnsettled(nowMonoMicros: 1_000_000, settleTimeoutMicros: 5_000_000));
+        Assert.Equal(1, l.FlagUnsettled(nowMonoMicros: 6_000_000, settleTimeoutMicros: 5_000_000));
+        Assert.True(l.IsActive(open)); // never flag a non-terminal (in-flight) reservation
+        Assert.True(l.IsActive(h));
+        Assert.True(l.NeedsReconcile(usdtA));
+        Assert.Equal(800m, l.Available(usdtA));
     }
 
     [Fact]

@@ -237,3 +237,23 @@ jadi datanya dikumpulkan di CI: job manual `seqlock-arm64` (`df8d55e`) = listing
   terpetakan, dan route yang mungkin tersembunyi di baliknya dilaporkan `Unknown` (= tertutup untuk guard), bukan Open;
   `WalletStatusBook.Update` mengembalikan jumlah network tak terpetakan (adapter → alert).
 - **HIJAU**: `R09_UnmappedNetworkTests 4 passed`; full suite `199 passed, 0 failed`.
+
+## R-06 (S2) — `InventoryLedger` meng-overstate Available (timeout & event saldo di ms yang sama)
+
+- **Test**: `Regression/R06_SameMillisecondBalanceTests.cs` (3, API lama), `Regression/R06_UnsettledReservationTests.cs`
+  (2, API baru), skenario P07. Test lama `InventoryLedgerTests.SettleTimeout_ReleasesTerminalReservations` yang
+  meng-*codify* overstatement (assert Available = 900) diganti `SettleTimeout_FlagsForReconcile_NeverReleases` (R-20 a).
+- **MERAH (perilaku, ms sama)**:
+  ```
+  FAIL …BalanceEventInTheSameMs_DoesNotReleaseTheFilledReservation   Expected: 0.02  Actual: 0.05
+  FAIL …TerminalReportAfterASameMsBalance_DoesNotReleaseImmediately   Assert.True() Failure
+  TOTAL: 1 passed, 2 failed
+  ```
+- **MERAH (timeout)**: compile (`'InventoryLedger' does not contain a definition for 'FlagUnsettled'` / `'NeedsReconcile'`);
+  perilaku lama terekam di P07 Claude-R: `expired=1 Available=0.05 BTC; true venue free = 0.02 BTC -> overstated by 0.03`,
+  `a second opportunity reserving 0.04 BTC succeeds: True`.
+- **Patch**: rilis hanya oleh event saldo **sesudah** (strict) waktu terminal, baik di `OnBalance` maupun `MarkTerminal`;
+  `ExpireSettled` (melepas) diganti `FlagUnsettled` (menandai slot untuk rekonsiliasi REST, tidak melepas, dilaporkan sekali);
+  `NeedsReconcile(slot)`; hasil REST (waktu server venue) masuk lewat `OnBalance` dan menyelesaikannya.
+- **HIJAU**: `R06_SameMillisecondBalanceTests 3 passed`, `R06_UnsettledReservationTests 2 passed`; full suite
+  `204 passed, 0 failed` (termasuk zero-alloc InventoryLedger dengan event saldo strictly later).
