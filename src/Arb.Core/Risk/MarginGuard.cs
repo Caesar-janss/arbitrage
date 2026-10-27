@@ -76,6 +76,29 @@ public readonly struct MarginDecision
     public double ReduceQtyCanon { get; init; }
 }
 
+/// <summary>Account-level decision (cross margin). ReducePair/FlattenPair apply to EVERY pair on the account, pro rata.</summary>
+public readonly struct AccountMarginDecision
+{
+    public MarginAction Action { get; init; }
+
+    public MarginZone Zone { get; init; }
+
+    public AccountMarginEstimate Estimate { get; init; }
+
+    /// <summary>Collateral needed at current sizes to restore TargetBps for the whole account.</summary>
+    public double CollateralNeededQuote { get; init; }
+
+    public double AddMarginQuote { get; init; }
+
+    public double TransferQuote { get; init; }
+
+    /// <summary>
+    /// Fraction (0..1] of EVERY position to close (both legs of each pair by the same canonical qty, so every pair stays
+    /// delta-neutral). 1 = flatten the account.
+    /// </summary>
+    public double ReduceFraction { get; init; }
+}
+
 /// <summary>
 /// Distance-to-liquidation controller for funding-arb perp legs (typically the SHORT leg when price spikes;
 /// in perp-perp also the long leg on a dump). Zones by distance d:
@@ -85,6 +108,11 @@ public readonly struct MarginDecision
 ///                              Isolated: FlattenPair (reducing an isolated position does not move its liq price)
 ///   d ≤ Critical             → FlattenPair
 /// Funding arb should run CROSS margin: it is the only mode where partial reduce actually buys distance.
+///
+/// <see cref="Evaluate"/> is PER POSITION: correct for ISOLATED margin, or for a cross account that holds exactly
+/// ONE position. A cross account with several positions shares one equity — every position "sees" all of it, so a
+/// per-position distance is optimistic (R-01: 3194 bps per position vs 1545 bps for the account). Use
+/// <see cref="EvaluateAccount"/> for cross accounts; same zones and actions, applied to the account.
 /// </summary>
 public static class MarginGuard
 {
@@ -168,6 +196,69 @@ public static class MarginGuard
             CollateralNeededQuote = need,
             AddMarginQuote = 0,
             ReduceQtyCanon = x.QtyCanon,
+        };
+    }
+    /// <summary>
+    /// Cross-margin ACCOUNT: same zone logic as <see cref="Evaluate"/>, on the account distance
+    /// (<see cref="CrossAccountMargin"/>). Reduce is pro rata across all positions; the caller reduces the partner leg of
+    /// every pair (other venue) by the same canonical qty.
+    /// </summary>
+    public static AccountMarginDecision EvaluateAccount(
+        ReadOnlySpan<AccountPosition> positions,
+        double equityQuote,
+        in MarginThresholds t,
+        double freeLocalCollateralQuote)
+    {
+        AccountMarginEstimate est = CrossAccountMargin.Estimate(positions, equityQuote);
+        double d = est.DistanceBps;
+        if (d > t.WarnBps)
+        {
+            return new AccountMarginDecision { Action = MarginAction.None, Zone = MarginZone.Healthy, Estimate = est };
+        }
+
+        if (d <= t.CriticalBps)
+        {
+            return new AccountMarginDecision { Action = MarginAction.FlattenPair, Zone = MarginZone.Critical, Estimate = est, ReduceFraction = 1 };
+        }
+
+        MarginZone zone = d <= t.ReduceBps ? MarginZone.Reduce : MarginZone.Warn;
+        double need = CrossAccountMargin.CollateralToReach(positions, equityQuote, t.TargetBps);
+        double local = Math.Min(need, Math.Max(0, double.IsNaN(freeLocalCollateralQuote) ? 0 : freeLocalCollateralQuote));
+        if (local >= need * (1 - 1e-12))
+        {
+            return new AccountMarginDecision
+            {
+                Action = MarginAction.AddMargin,
+                Zone = zone,
+                Estimate = est,
+                CollateralNeededQuote = need,
+                AddMarginQuote = need,
+            };
+        }
+
+        if (zone == MarginZone.Warn)
+        {
+            return new AccountMarginDecision
+            {
+                Action = MarginAction.RebalanceCollateral,
+                Zone = zone,
+                Estimate = est,
+                CollateralNeededQuote = need,
+                AddMarginQuote = local,
+                TransferQuote = need - local,
+            };
+        }
+
+        double keep = CrossAccountMargin.KeepFractionToReach(positions, equityQuote + local, t.TargetBps);
+        return new AccountMarginDecision
+        {
+            Action = keep <= 0 ? MarginAction.FlattenPair : MarginAction.ReducePair,
+            Zone = zone,
+            Estimate = est,
+            CollateralNeededQuote = need,
+            AddMarginQuote = local,
+            TransferQuote = need - local,
+            ReduceFraction = 1 - keep,
         };
     }
 }

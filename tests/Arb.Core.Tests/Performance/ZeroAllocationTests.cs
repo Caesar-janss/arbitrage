@@ -122,6 +122,12 @@ public class ZeroAllocationTests
         var exposure = new PerpExposure(Side.Sell, 100_000_000, 0.000012, 180, MarginMode.Cross);
         AssertZeroAlloc("Liquidation", () => LiquidationCalculator.Estimate(exposure, tiers, 0.00055));
         AssertZeroAlloc("MarginGuard", () => MarginGuard.Evaluate(exposure, tiers, 0.00055, 0.00055, thresholds, 50));
+        AccountPosition[] account =
+        {
+            new(Side.Sell, 100_000_000, 0.000012, tiers, 0.00055, 0.00055),
+            new(Side.Sell, 0.02, 60_000, tiers, 0.00055, 0.00055),
+        };
+        AssertZeroAlloc("MarginGuard.EvaluateAccount", () => MarginGuard.EvaluateAccount(account, 500, thresholds, 50));
 
         AssertZeroAlloc("TradeStateMachine", () =>
         {
