@@ -1,5 +1,9 @@
 # Tahap 1 — `Arb.Core` (v0.2)
 
+> **Status: REVIEW TERBUKA.** Temuan ronde 1 dan koreksi atas dokumen ini dicatat di
+> [`review/FINDINGS_LOG.md`](review/FINDINGS_LOG.md). Klaim di dokumen ini yang dibantah review (mis. §3.9) tetap
+> dibiarkan apa adanya sampai patch v0.3 masuk, dengan catatan di log.
+
 Pure domain library: **zero dependency eksternal, tanpa I/O, deterministik**. Semua kalkulasi & state
 yang menentukan "masuk / tidak / bagaimana memperbaiki" ada di sini dan diuji tanpa API key.
 

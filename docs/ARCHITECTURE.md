@@ -1,7 +1,7 @@
 # ArbEngine — Architecture Blueprint (v0.1)
 
 > Multi-Strategy Crypto Arbitrage Engine · .NET 8 Worker Service · PostgreSQL 16
-> Status: skema DB tervalidasi (v0.1) · **Tahap 1 `Arb.Core` selesai (v0.2), lihat [`STAGE1_CORE.md`](STAGE1_CORE.md)** · Tahap 2: adapter venue.
+> Status: skema DB tervalidasi (v0.1) · **Tahap 1 `Arb.Core`: dibangun (v0.2), status REVIEW TERBUKA** — lihat [`STAGE1_CORE.md`](STAGE1_CORE.md) & [`review/FINDINGS_LOG.md`](review/FINDINGS_LOG.md) · Tahap 2: adapter venue.
 
 ---
 

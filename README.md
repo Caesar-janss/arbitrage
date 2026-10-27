@@ -6,7 +6,7 @@ Multi-Strategy Crypto Arbitrage Engine (Spatial + Funding Rate) — .NET 8 + Pos
 | Tahap | Isi | Dokumen |
 |---|---|---|
 | 0 | Blueprint + skema PostgreSQL (6 migrasi, 95 assertion) | `docs/ARCHITECTURE.md` |
-| **1** | **`Arb.Core`: pricing, order book seqlock, state machine, risk, inventory (150 test, 0 B/op hot path)** | **`docs/STAGE1_CORE.md`** |
+| **1** | **`Arb.Core`: pricing, order book seqlock, state machine, risk, inventory (0 B/op hot path) — REVIEW TERBUKA (ronde 1, patch v0.3 sedang ditriase)** | **`docs/STAGE1_CORE.md`, `docs/review/FINDINGS_LOG.md`** |
 | 2 | Adapter venue (Bitget/Bybit/Binance) — menunggu keputusan venue/region (STAGE1_CORE §5) | — |
 
 ## Struktur

@@ -6,11 +6,15 @@ bukti dijadikan test xUnit yang gagal sebelum fix (syarat `TEAM_WORKFLOW.md` §5
 
 ## Tahap 1 — `Arb.Core`, ronde 1 (versi v0.2 / `93df9953f26c`)
 
-Detail tiap temuan: `docs/review/stage1/R_claude-r.md`. Gemini & ChatGPT: menunggu.
+**Status Tahap 1: REVIEW TERBUKA.** Ditutup hanya jika (1) setiap temuan S1/S2 CONFIRMED punya fix + regression test
+yang tercatat gagal sebelum fix dan lulus sesudahnya (`docs/review/stage1/REGRESSION_LOG.md`), (2) C-01/C-02 sudah
+ditriase, (3) review Gemini masuk dan ditriase, (4) Jansen menyetujui secara eksplisit. Patch v0.3 tidak mengubah status ini.
+
+Detail tiap temuan Claude-R: `docs/review/stage1/R_claude-r.md`. ChatGPT: lihat bagian di bawah. Gemini: menunggu.
 
 | ID | Sev | Area | Klaim (ringkas) | Status | Bukti triase | Batch fix |
 |---|---|---|---|---|---|---|
-| R-01 | S1 | MarginGuard / Liquidation | per posisi vs equity cross bersama | CONFIRMED | P11 dijalankan ulang; hitung manual 1545 bps | A |
+| R-01 | S1 | MarginGuard / Liquidation | per posisi vs equity cross bersama | CONFIRMED | P11 dijalankan ulang; hitung manual 1545 bps = **zona Warn** (label "Reduce" di laporan awal salah, dikoreksi) | A |
 | R-02 | S1 | Repair PerpHedge + state | hedge perp → REPAIRED terminal, kaki terbuka tanpa pemilik | CONFIRMED | P18 | A |
 | R-10 | S2 | State machine C#+SQL | tidak ada jalur likuidasi/ADL & partial reduce | CONFIRMED | P06 | A |
 | R-03 | S2 | SpatialArbPricer | haircut tidak dipakai di limit/VWAP/edge | CONFIRMED | P01 | B |
@@ -37,14 +41,34 @@ Detail tiap temuan: `docs/review/stage1/R_claude-r.md`. Gemini & ChatGPT: menung
 - **C**: inventory & gate.
 - **D**: kontrak DB/analytics & test.
 
+### ChatGPT — Tahap 1 ronde 1
+
+Pemetaan duplikat berasal dari reviewer ChatGPT. Duplikat **tidak dihitung sebagai temuan baru**; dicatat sebagai
+konfirmasi independen atas temuan yang sudah ada. Isi lengkap C-01…C-06 belum diterima Claude: klaim C-03…C-06 akan
+dibandingkan dengan R-xx saat file diterima (jika ternyata berbeda substansi, status diubah dan dicatat di sini).
+
+| ID | Sev | Area | Klaim (ringkas) | Status | Bukti triase | Batch fix |
+|---|---|---|---|---|---|---|
+| C-01 | ? | ? | isi belum diterima | **MENUNGGU TRIASE** (temuan tambahan) | perlu file temuan ChatGPT | — |
+| C-02 | ? | ? | isi belum diterima | **MENUNGGU TRIASE** (temuan tambahan) | perlu file temuan ChatGPT | — |
+| C-03 | — | InventoryLedger | → R-06 | DUPLICATE of R-06 | pemetaan reviewer | (C, via R-06) |
+| C-04 | — | SpatialArbPricer | → R-03 | DUPLICATE of R-03 | pemetaan reviewer | (B, via R-03) |
+| C-05 | — | RepairPlanner | → R-13 | DUPLICATE of R-13 | pemetaan reviewer | (C, via R-13) |
+| C-06 | — | MarginGuard | → R-01 | DUPLICATE of R-01 | pemetaan reviewer; ChatGPT juga menandai label zona 1545 bps yang salah (dikoreksi) | (A, via R-01) |
+
 ### Koreksi atas klaim Claude sendiri (dari ronde ini)
 - `STAGE1_CORE` §3.9 "available tidak pernah overstated": **salah** (R-06).
 - §3.6 menyarankan cross margin di akun strategi tanpa menyebut prasyarat "satu posisi per akun". Model per posisi tidak aman untuk multi-pair (R-01).
 - §4 "seqlock benar": hanya terbukti untuk **single writer di x64** (R-04, R-05).
+- Laporan R-01 menulis 1545 bps sebagai "zona Reduce": **salah**, yang benar zona Warn (1500 < 1545 ≤ 2500). Ditandai
+  reviewer ChatGPT. Lolos dari cek ulang Claude karena yang dicek hanya angkanya, bukan labelnya.
 
 ### Statistik reviewer
-| Reviewer | Temuan | CONFIRMED | REJECTED | NEEDS-DATA | Precision |
-|---|---:|---:|---:|---:|---:|
-| Claude-R | 20 | 19 | 0 | 1 | 100% (19/19 yang terputus) |
-| Gemini | — | | | | |
-| ChatGPT | — | | | | |
+| Reviewer | Dilaporkan | Unik (baru) | DUPLICATE | CONFIRMED | REJECTED | NEEDS-DATA | Menunggu triase | Precision (unik yang terputus) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Claude-R | 20 | 20 | 0 | 19 | 0 | 1 | 0 | 100% (19/19) |
+| ChatGPT | 6 | ≤ 2 | 4 | 0 | 0 | 0 | 2 | — (belum ada yang terputus) |
+| Gemini | — | | | | | | | |
+
+Aturan hitung: "Unik" = tidak tumpang-tindih dengan temuan yang tercatat lebih dulu. DUPLICATE tidak menambah skor
+temuan, tetapi koreksi label (R-01) dicatat di atas sebagai kontribusi review.
