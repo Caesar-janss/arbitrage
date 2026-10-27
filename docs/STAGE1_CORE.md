@@ -1,8 +1,33 @@
-# Tahap 1 — `Arb.Core` (v0.2)
+# Tahap 1 — `Arb.Core` (v0.3)
 
-> **Status: REVIEW TERBUKA.** Temuan ronde 1 dan koreksi atas dokumen ini dicatat di
-> [`review/FINDINGS_LOG.md`](review/FINDINGS_LOG.md). Klaim di dokumen ini yang dibantah review (mis. §3.9) tetap
-> dibiarkan apa adanya sampai patch v0.3 masuk, dengan catatan di log.
+> **Status: REVIEW TERBUKA.** v0.3 = patch untuk 20 temuan review ronde 1 (Claude-R). Setiap patch didahului
+> regression test yang terbukti merah di kode lama ([`review/stage1/REGRESSION_LOG.md`](review/stage1/REGRESSION_LOG.md)).
+> Klaim v0.2 yang dibantah review dikoreksi di bawah dan ditandai **(R-xx)**. Triase lengkap ada di
+> [`review/FINDINGS_LOG.md`](review/FINDINGS_LOG.md).
+
+## 0. Perubahan v0.3 (ringkas)
+| Temuan | Perubahan | Kewajiban host (Tahap 2+) |
+|---|---|---|
+| R-01 | `CrossAccountMargin` + `MarginGuard.EvaluateAccount`: jarak likuidasi **per akun cross** | akun cross → `EvaluateAccount`; per posisi hanya isolated / 1 posisi |
+| R-02 | hedge perp residual spatial = `POSITION_OPEN → EXITING → CLOSED`; `TradeGroup` melacak posisi perp per instrumen | `ApplyFill(instrument, …)`; tulis `repair_method = PERP_HEDGE` |
+| R-03 | limit IOC / VWAP / edge memakai haircut yang sama dengan Q* | – |
+| R-04 | `MarkInvalid` / `MarkResyncing` = request flag dari thread mana pun, tidak menulis versi seqlock | – |
+| R-05 | **REJECTED berdasarkan data** (disassembly JIT ARM64 di CI): tidak ada lowering `staddl`/`xzr` | jalankan job `seqlock-arm64` saat upgrade runtime |
+| R-06 | rilis reservasi hanya oleh saldo *strictly later*; timeout → `FlagUnsettled` (bukan rilis) | `NeedsReconcile` → rekonsiliasi REST → `OnBalance` |
+| R-07 | `BookTooOld` (spatial 1 s, funding 5 s), `PairSkew`, latency negatif = `ClockUncertain` | `FreshnessLimits.From(limits, strategy)` |
+| R-08 | `GridGeneration` di spec & book; book dari grid lain tidak di-price | snapshot ulang dengan generasi baru setelah perubahan tick/step |
+| R-09 | `NetworkId` 0 = tak terpetakan, tidak pernah membentuk route | alert bila `Update` mengembalikan > 0 |
+| R-10 | transisi `POSITION_OPEN→RESIDUAL/STUCK`, `EXITING→POSITION_OPEN` (C# + SQL) | – |
+| R-11 | cap inventory non-replenishable **kumulatif** sejak route tutup (`RouteBudgetTracker`) | `Observe` tiap evaluasi, `RecordUse` setelah fill |
+| R-12 | route quote tertutup + `ReferencePx` tidak valid → `RejectSanity` | – |
+| R-13 | repair BUY dengan fee base di-gross-up | isi `RepairCandidate.FeeAsset` dari `FeeModel` |
+| R-14 | satu definisi flat: delta = dust yang **diterima eksplisit** (`AcceptResidualAsDust`), sama di SQL | tulis `dust_accepted_base` |
+| R-15 | quote reject: nilai tak dihitung = NaN (→ NULL); kolom eksekusi nullable kecuali EXECUTE | NaN/0-level → NULL saat COPY |
+| R-16 | `ExpectedCashQuote` (basis capture ratio), funding di `TradeGroup`, `v_rebalance_cost_daily` | tulis `exp_slippage_buffer_quote`, `exp_rebalance_quote` |
+| R-17 | Snowflake wajib `resumeAfterUnixMs` (high-water mark) | journal `LastIssuedUnixMs`; resume = max(journal, DB) + margin |
+| R-18 | gate funding & `RiskLimits.Validate` menolak NaN/∞ | – |
+| R-19 | dust dinilai di venue tempat ia berada (bid beli / ask jual) | – |
+| R-20 | kontrak semua enum ↔ SQL, brute force Q* dengan hurdle/cap/haircut, komentar SQL dibuang | – |
 
 Pure domain library: **zero dependency eksternal, tanpa I/O, deterministik**. Semua kalkulasi & state
 yang menentukan "masuk / tidak / bagaimana memperbaiki" ada di sini dan diuji tanpa API key.
@@ -42,12 +67,12 @@ Belum ada di Tahap 1 (sengaja, didesain bersama adapter di Tahap 2): interface v
 
 ```bash
 dotnet build ArbEngine.sln -c Release          # src/: TreatWarningsAsErrors
-dotnet test  tests/Arb.Core.Tests -c Release   # 150 test case
+dotnet test  tests/Arb.Core.Tests -c Release   # 250 test case (v0.3)
 dotnet run   -c Release --project tests/Arb.Benchmarks -- --filter '*'
 # acceptance: kolom "Allocated" = "-" untuk semua benchmark
 ```
-Test kontrak SQL membaca `db/migrations/V002__trading.sql` (dicari ke atas dari folder output;
-override dengan env `ARB_REPO_ROOT`).
+Test kontrak SQL membaca **semua** `db/migrations/V*.sql` (dicari ke atas dari folder output; override dengan env
+`ARB_REPO_ROOT`), dengan komentar SQL dibuang lebih dulu.
 
 ---
 
@@ -72,18 +97,24 @@ sekarang dihitung dengan `decimal`, dan `FixedPoint.ToUnits` memakai toleransi r
 - Satu seksi seqlock per pesan venue → reader tidak pernah melihat setengah pesan.
 - Crossed book / qty negatif / harga ≤ 0 → `Invalid` sampai snapshot baru.
 - **Sifat seqlock:** writer yang tidak pernah jeda membuat reader kelaparan (`TryCopyTo` → false). Di engine itu berarti "evaluasi ulang pada dirty signal berikutnya", bukan error.
+- **(R-04)** Hanya thread writer yang menulis versi. `MarkInvalid`/`MarkResyncing` dari thread lain (watchdog, timer, operator) menaikkan *request flag*: reader langsung melihat Invalid/Resyncing, `ApplyDelta` menolak, `ApplySnapshot` mengonsumsinya. `EndWrite` memakai nilai ganjil section itu sendiri. Klaim v0.2 "seqlock benar" hanya berlaku untuk single writer.
+- **(R-05)** ARM64: disassembly JIT .NET 8 di runner `ubuntu-24.04-arm` menunjukkan `ldaddal` dengan register tujuan nyata (acquire + release), bukan `staddl`; stress 20/20. Hasil increment wajib tetap dipakai (komentar di `BeginWrite`).
 
 ### 3.3 Q* (CrossedBookOptimizer)
 Marginal net unit ke-q: `m(q) = bid_B(q)(1−f_B−s_B) − ask_A(q)(1+f_A+s_A) − c_unit`, non-increasing.
 NetProfit(Q) = ∫m → concave piecewise-linear → maksimum saat m(q) ≤ hurdle. Cukup satu merge-walk.
 Hurdle `MinMarginalEdgeBps` berlaku **per unit marginal**: level dalam yang menambah eksposur dengan
 edge tipis tidak diambil. Hasil kontinu → floor ke common lot → walk exact ulang → net edge exact.
+**(R-03)** Walk exact ulang memakai haircut yang **sama** dengan Q*: level marginalnya menjadi limit IOC, sehingga IOC
+tetap terisi penuh walau hanya fraksi haircut yang benar-benar tersedia.
 
 ### 3.4 Fee di aset base
 Spot buy tanpa token diskon: fee dipotong dari koin yang **diterima**. Tanpa koreksi, setiap trade
 meninggalkan short `Q·f` di venue jual (inventory drift). `LotNormalizer.GrossUpBuyLots` membeli
 `Q/(1−f)` dibulatkan ke atas → residual selalu ≥ 0 (dust long). `NetEdgeCalculator` menghitung fee
-base **sekali**, sebagai residual × mark (tidak double count).
+base **sekali**, sebagai residual × mark (tidak double count). **(R-19)** Mark = harga di venue tempat residual
+berada: dust long di **bid venue beli**, dust short (fee base di kaki jual) di **ask venue jual**. **(R-13)** Repair BUY
+dengan fee base di-gross-up dengan cara yang sama (`RepairCandidate.FeeAsset`).
 
 ### 3.5 Deposit/withdraw (Tambahan #1) — kenapa TIDAK di `InstrumentSpec`
 Status wallet itu per **(venue, aset, network)** dan berubah dalam hitungan menit (maintenance chain),
@@ -94,7 +125,8 @@ Aturan yang lebih ketat dari sekadar "flag on/off":
 1. **Route** A→B ada hanya jika **satu network yang sama** punya withdraw A ∧ deposit B. Withdraw Bitget hanya TRC20 dan deposit Bybit hanya ERC20 berarti tidak ada route.
 2. Status basi (> `MaxWalletStatusAgeMs`) = `Unknown` = diperlakukan tertutup (fail-safe).
 3. Spot-spot, route tertutup, edge > `WalletClosedMaxEdgeBps` → `REJECT_SANITY` + `SuspectedWalletTrap`. Spread melebar *karena* koin tidak bisa dipindah.
-4. Route tertutup + edge normal → boleh **hanya** dengan inventory yang sudah ada, di-cap `NonReplenishableInventoryFraction` (tidak bisa diisi ulang sampai wallet buka).
+4. Route tertutup + edge normal → boleh **hanya** dengan inventory yang sudah ada: **kumulatif** paling banyak `NonReplenishableInventoryFraction` × inventory saat route tutup (`NonReplenishableBudget`, `RouteBudgetTracker`). v0.2 menghitung fraksi dari sisa per evaluasi → 22 trade menguras 99,8 % **(R-11)**. Budget tidak diberikan → `RejectInventory` (fail-closed). Route quote tertutup tanpa `ReferencePx` valid → `RejectSanity` **(R-12)**.
+6. **(R-09)** Network yang tidak bisa dipetakan adapter (`NetworkId` 0) tidak pernah cocok dengan apa pun dan membuat route `Unknown`, bukan Open.
 5. Ada kaki perp (perp-perp, spot-perp) → status wallet koin diabaikan (sesuai permintaan).
 
 ### 3.6 Distance-to-liquidation (Tambahan #2)
@@ -118,6 +150,14 @@ harga likuidasi hampir tidak bergerak. *Partial reduce hanya efektif di cross ma
 sebaiknya berjalan di cross margin (akun khusus strategi). Entry funding juga di-gate:
 `FundingVerdict.RejectLiquidationDistance` bila jarak awal < `MinEntryLiqDistanceBps`.
 
+**Koreksi (R-01):** rumus di atas (dan `MarginGuard.Evaluate`) adalah **per posisi**. Di akun cross dengan lebih dari satu
+posisi, semua posisi berbagi satu equity; menghitung tiap posisi terhadap seluruh equity terlalu optimistis (contoh: 2 short
+× 3000 USDT, equity 1000 → 3194 bps per posisi, padahal **1545 bps untuk akun = zona Warn**). Untuk akun cross dipakai
+`CrossAccountMargin` / `MarginGuard.EvaluateAccount`: surplus akun di bawah guncangan adverse seragam pada semua kaki
+(tier pada notional tergoncang), `CollateralToReach` exact, `KeepFractionToReach` (reduce pro-rata, fee reduce ikut
+dihitung). Zona & aksi sama; `ReduceFraction` berlaku untuk setiap pair. Gate entry funding harus memakai jarak akun
+**setelah** posisi baru ditambahkan.
+
 ### 3.7 Slippage per kaki = f(latency kaki itu)
 `horizon = umur data + latency order one-way` → `σ·√horizon`. Konsekuensinya: kaki venue yang jauh
 otomatis mendapat buffer lebih besar. Test `SlowLeg_GetsLargerSlippageBuffer_AndCanKillTheTrade`
@@ -130,11 +170,34 @@ ladder (10/30/80 bps), tidak pernah market order murni.
 `MaxStopLossBps` **tidak memblok** flatten: membiarkan residual terbuka = taruhan arah tanpa hedge.
 Ia hanya mem-flag (→ breaker), dan `SevereLossBps` → HALT_GLOBAL.
 
+**(R-02)** Repair `PerpHedge` membuat delta 0 tetapi **dua posisi terbuka** (spot + perp). Trade tidak boleh terminal:
+`REPAIRING → POSITION_OPEN → EXITING → CLOSED`, dan `TradeGroup` menolak COMPLETED/REPAIRED/CLOSED selama ada perp
+terbuka. **(R-14)** Satu definisi flat: residual yang di bawah minimum venue (atau ≤ `DustCanon`) harus **diterima
+eksplisit** (`AcceptResidualAsDust`, disimpan sebagai `dust_accepted_base`) sebelum state terminal; DB memakai aturan yang
+sama. `RepairPlan.DustQuote` = nilai yang di-write-off (alert di atas `dust_quote`). **(R-10)** Saat posisi ditahan:
+likuidasi/ADL satu kaki → `RESIDUAL`, venue down → `STUCK`, partial reduce → `EXITING → POSITION_OPEN`.
+
 ### 3.9 InventoryLedger
-`Available = venueFree − reserved`. Reservasi dilepas saat order terminal **dan** ada balance event
-dengan waktu ≥ terminal. Selama IOC berjalan bisa terjadi double count, tapi ke arah aman: available
-bisa *understated*, tidak pernah *overstated*. `TryReservePair` atomik sehingga dua peluang tidak pernah
-memakai saldo yang sama. `ExpireSettled` sebagai jaring pengaman (diikuti rekonsiliasi REST).
+`Available = venueFree − reserved`. Reservasi dilepas saat order terminal **dan** ada balance event dengan waktu
+**sesudah** (strict) terminal. Selama IOC berjalan bisa terjadi double count, tapi ke arah aman. `TryReservePair`
+atomik sehingga dua peluang tidak pernah memakai saldo yang sama.
+
+**Koreksi (R-06):** klaim v0.2 "tidak pernah overstated" **salah**: `ExpireSettled` melepas reservasi yang fill-nya belum
+tercermin, dan event saldo di milidetik yang sama dengan fill (layanan venue yang berbeda) juga melepasnya (Available 0,05
+padahal 0,02 BTC). v0.3: rilis hanya oleh event *strictly later*; timeout memanggil `FlagUnsettled` → slot
+`NeedsReconcile` → rekonsiliasi REST (waktu server venue) masuk lewat `OnBalance`. Tidak pernah dilepas karena waktu.
+
+### 3.10 Kesegaran data (R-07), grid spec (R-08), ID (R-17), persistensi (R-15, R-16)
+- `StaleDataGuard`: selain silence generik, **umur maks per strategi** (`BookTooOld`: spatial 1000 ms, funding 5000 ms) dan
+  **skew terima antar-book** (`PairSkew`: 500 / 2000 ms). Latency negatif melebihi ketidakpastian jam + 1 ms resolusi
+  timestamp venue = `ClockUncertain` (offset salah). `FreshnessLimits.From(limits)` = batas spatial (paling ketat).
+- Perubahan tick/step lewat `Replace` menaikkan `InstrumentSpec.GridGeneration`; book membawa generasi grid saat
+  di-parse (`ApplySnapshot(…, gridGeneration)`); pricer & repair menolak book dari generasi lain.
+- `SnowflakeIdGenerator(node, clock, resumeAfterUnixMs)`: semua ID punya ms > titik resume walau jam mundur setelah
+  restart; host men-journal `LastIssuedUnixMs`.
+- `SpatialQuote`: nilai yang tidak dihitung = NaN → NULL (`HasExecutionPricing`); `EdgeBreakdown.ExpectedCashQuote`
+  (= net + buffer slippage + rebalance) adalah basis capture ratio; `TradeGroup.ApplyFunding` menyamakan model kas
+  dengan `v_trade_ledger`.
 
 ---
 
