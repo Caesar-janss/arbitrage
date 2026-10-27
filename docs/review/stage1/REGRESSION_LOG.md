@@ -305,3 +305,21 @@ jadi datanya dikumpulkan di CI: job manual `seqlock-arm64` (`df8d55e`) = listing
   (`vwap/(1−f)` untuk beli); `PlannedQtyCanon` = residual yang diratakan.
 - **HIJAU**: `R13_RepairBaseFeeGrossUpTests 3 passed` (beli 0,010011 → terima 0,010000989 ≥ 0,01, lebih < 1 lot);
   full suite `215 passed, 0 failed`.
+
+## R-18 (S3) — gate funding fail-open untuk NaN/∞; `MinFundingNetApr` tidak divalidasi
+
+- **Test**: `Regression/R18_FundingGateNanTests.cs` (7; API lama), skenario P05.
+- **MERAH**:
+  ```
+  FAIL …NaNGate_NeverEnters                                  NaN gate → Enter
+  FAIL …NonFiniteHold_IsInvalidInput(Infinity)               Expected: RejectInvalidInput  Actual: Enter
+  FAIL …NonFiniteInputs_AreInvalid                           Expected: RejectInvalidInput  Actual: RejectNegativeExpectedPnl (Leverage = +∞ lolos validasi)
+  FAIL …RiskLimits_EveryDoubleProperty_IsCheckedForNaN       MaxConnectionSilenceMs = NaN is not reported: [silence limits > 0]
+  FAIL …RiskLimits_RejectNonFiniteFundingAndOtherDoubles     Assert.True() Failure (MinFundingNetApr = NaN → 0 error)
+  TOTAL: 2 passed, 5 failed
+  ```
+- **Patch**: `FundingGate.IsValid` (semua batas finite, > 0 / ≥ 1); `Evaluate` mewajibkan semua input finite dan gate valid,
+  serta setiap gate ditulis `!(nilai di dalam batas)`. Jarak likuidasi NaN tetap ditolak oleh gate likuidasi sendiri
+  (verdict lama `RejectLiquidationDistance` dipertahankan). `RiskLimits.Validate`: semua properti double wajib finite
+  (dengan nama properti di pesan) + rentang `MinFundingNetApr`; test refleksi menjaga agar properti double baru tidak lolos.
+- **HIJAU**: `R18_FundingGateNanTests 7 passed`; full suite `222 passed, 0 failed`.

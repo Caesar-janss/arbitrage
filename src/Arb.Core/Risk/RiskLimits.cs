@@ -107,6 +107,12 @@ public sealed record RiskLimits
             }
         }
 
+        // R-18: every double must be finite — NaN fails ordinary comparisons in some places and passes them in others
+        foreach ((string name, double value) in Doubles())
+        {
+            Require(double.IsFinite(value), name + " must be finite");
+        }
+
         Require(MaxExchangeLatencyMs > 0, "MaxExchangeLatencyMs > 0");
         Require(MaxBookSilenceMs > 0 && MaxConnectionSilenceMs > 0, "silence limits > 0");
         Require(MaxClockUncertaintyMs > 0 && MaxClockUncertaintyMs < MaxExchangeLatencyMs, "0 < MaxClockUncertaintyMs < MaxExchangeLatencyMs");
@@ -132,8 +138,45 @@ public sealed record RiskLimits
             "MarginTarget > Warn > Reduce > Critical > 0");
         Require(MaxLeverage is >= 1 and <= 20, "MaxLeverage 1..20");
         Require(MaxBreakEvenHours > 0, "MaxBreakEvenHours > 0");
+        Require(MinFundingNetApr is >= -1 and <= 10, "MinFundingNetApr in [-1, 10] (fraction per year)");
         Require(MinEntryLiqDistanceBps > MarginWarnBps, "MinEntryLiqDistanceBps > MarginWarnBps (entry must start healthy)");
         return errors;
+    }
+
+    private IEnumerable<(string Name, double Value)> Doubles()
+    {
+        yield return (nameof(MaxExchangeLatencyMs), MaxExchangeLatencyMs);
+        yield return (nameof(MaxBookSilenceMs), MaxBookSilenceMs);
+        yield return (nameof(MaxConnectionSilenceMs), MaxConnectionSilenceMs);
+        yield return (nameof(MaxClockUncertaintyMs), MaxClockUncertaintyMs);
+        yield return (nameof(MaxSpatialBookAgeMs), MaxSpatialBookAgeMs);
+        yield return (nameof(MaxSpatialPairSkewMs), MaxSpatialPairSkewMs);
+        yield return (nameof(MaxFundingBookAgeMs), MaxFundingBookAgeMs);
+        yield return (nameof(MaxFundingPairSkewMs), MaxFundingPairSkewMs);
+        yield return (nameof(MaxNotionalPerTradeQuote), MaxNotionalPerTradeQuote);
+        yield return (nameof(MinProfitQuote), MinProfitQuote);
+        yield return (nameof(MinMarginalEdgeBps), MinMarginalEdgeBps);
+        yield return (nameof(MaxStopLossBps), MaxStopLossBps);
+        yield return (nameof(SevereLossBps), SevereLossBps);
+        yield return (nameof(MaxDailyDrawdownPct), MaxDailyDrawdownPct);
+        yield return (nameof(SanityMaxGrossEdgeBps), SanityMaxGrossEdgeBps);
+        yield return (nameof(WalletClosedMaxEdgeBps), WalletClosedMaxEdgeBps);
+        yield return (nameof(NonReplenishableInventoryFraction), NonReplenishableInventoryFraction);
+        yield return (nameof(MarginTargetBps), MarginTargetBps);
+        yield return (nameof(MarginWarnBps), MarginWarnBps);
+        yield return (nameof(MarginReduceBps), MarginReduceBps);
+        yield return (nameof(MarginCriticalBps), MarginCriticalBps);
+        yield return (nameof(MaxLeverage), MaxLeverage);
+        yield return (nameof(MaxBreakEvenHours), MaxBreakEvenHours);
+        yield return (nameof(MinFundingNetApr), MinFundingNetApr);
+        yield return (nameof(MinEntryLiqDistanceBps), MinEntryLiqDistanceBps);
+        if (RepairLadderBps is not null)
+        {
+            for (int i = 0; i < RepairLadderBps.Count; i++)
+            {
+                yield return (nameof(RepairLadderBps) + "[" + i + "]", RepairLadderBps[i]);
+            }
+        }
     }
 
     private static bool IsStrictlyIncreasingPositive(IReadOnlyList<double> values)
