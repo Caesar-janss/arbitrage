@@ -323,3 +323,16 @@ jadi datanya dikumpulkan di CI: job manual `seqlock-arm64` (`df8d55e`) = listing
   (verdict lama `RejectLiquidationDistance` dipertahankan). `RiskLimits.Validate`: semua properti double wajib finite
   (dengan nama properti di pesan) + rentang `MinFundingNetApr`; test refleksi menjaga agar properti double baru tidak lolos.
 - **HIJAU**: `R18_FundingGateNanTests 7 passed`; full suite `222 passed, 0 failed`.
+
+## R-19 (S3) — dust gross-up ada di venue BELI tetapi dinilai pakai VWAP venue JUAL
+
+- **Test**: `Regression/R19_ResidualMarkTests.cs` (2; API lama), skenario P21 + kasus fee base di kaki jual.
+- **MERAH**:
+  ```
+  FAIL …LongDust_IsValuedAtTheBuyVenueBid      Expected: 4.88521  Actual: 4.92437  Diff: 0.03916  (9,2 % dari net)
+  FAIL …ShortDust_IsValuedAtTheSellVenueAsk    Expected: -0.6025  Actual: -0.602   Diff: 0.0005
+  TOTAL: 0 passed, 2 failed
+  ```
+- **Patch**: `SpatialArbPricer`: residual positif (koin lebih di venue beli) dinilai di **bid venue beli**; residual negatif
+  (fee base di kaki jual → kekurangan di venue jual) dinilai di **ask venue jual** (biaya beli kembali).
+- **HIJAU**: `R19_ResidualMarkTests 2 passed` (net 0,38461, bukan 0,42377); full suite `224 passed, 0 failed`.

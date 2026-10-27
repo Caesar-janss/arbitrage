@@ -180,9 +180,19 @@ public static class SpatialArbPricer
 
         double buyVwap = buyFill.CanonicalVwap(buy);
         double sellVwap = sellFill.CanonicalVwap(sell);
+        double buyQty = buy.CanonicalQty(buyLots);
+        double sellQty = sell.CanonicalQty(sellLots);
+
+        // Residual (gross-up / base-fee dust) is valued WHERE it lands (R-19): long dust stays on the buy venue → its
+        // bid; short dust (base fee on the sell leg) must be bought back on the sell venue → its ask.
+        double residual = (buyQty * (p.BuyFee.Asset == FeeAssetKind.Base ? 1 - p.BuyFee.Rate : 1))
+            - (sellQty * (p.SellFee.Asset == FeeAssetKind.Base ? 1 + p.SellFee.Rate : 1));
+        double residualMark = residual >= 0
+            ? buy.CanonicalPrice(buyBook.Bids[0].PxTicks)
+            : sell.CanonicalPrice(sellBook.Asks[0].PxTicks);
         EdgeBreakdown edge = NetEdgeCalculator.Compute(new EdgeInputs(
-            buy.CanonicalQty(buyLots),
-            sell.CanonicalQty(sellLots),
+            buyQty,
+            sellQty,
             buyVwap,
             sellVwap,
             p.BuyFee,
@@ -190,7 +200,7 @@ public static class SpatialArbPricer
             p.BuySlipBps,
             p.SellSlipBps,
             p.RebalancePerUnitQuote,
-            sellVwap));
+            residualMark));
 
         return new SpatialQuote
         {
