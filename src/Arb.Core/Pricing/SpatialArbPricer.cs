@@ -59,10 +59,18 @@ public readonly struct SpatialParams
     public int MaxLevelsPerSide { get; init; }
 }
 
-/// <summary>Decision + everything needed to fire both IOC legs and to persist trd.opportunity.</summary>
+/// <summary>
+/// Decision + everything needed to fire both IOC legs and to persist trd.opportunity.
+/// Persistence contract (R-15): a price the pricer did not compute is NaN (never 0) and is written as NULL; when
+/// <see cref="HasExecutionPricing"/> is false, qty / VWAP / worst px / levels / edge / cost columns are NULL. V007 makes
+/// those columns nullable for every decision except EXECUTE.
+/// </summary>
 public readonly struct SpatialQuote
 {
     public RejectReason Decision { get; init; }
+
+    /// <summary>Both legs were walked and the edge computed (EXECUTE, or a reject after pricing).</summary>
+    public bool HasExecutionPricing { get; init; }
 
     public CrossStop Stop { get; init; }
 
@@ -129,12 +137,13 @@ public static class SpatialArbPricer
 
         if (!buyBook.IsUsable || !sellBook.IsUsable)
         {
-            return new SpatialQuote { Decision = RejectReason.RejectStale };
+            return Unpriced(RejectReason.RejectStale, default, double.NaN, double.NaN, double.NaN);
         }
 
         if (buyBook.GridGeneration != buy.GridGeneration || sellBook.GridGeneration != sell.GridGeneration)
         {
-            return new SpatialQuote { Decision = RejectReason.RejectStale }; // ticks/lots parsed with another grid (R-08)
+            // ticks/lots parsed with another grid (R-08): even the top of book is not a price
+            return Unpriced(RejectReason.RejectStale, default, double.NaN, double.NaN, double.NaN);
         }
 
         ReadOnlySpan<PriceLevel> asks = buyBook.Asks;
@@ -148,13 +157,13 @@ public static class SpatialArbPricer
         CrossResult cross = CrossedBookOptimizer.Optimize(asks, buy, bids, sell, costs, limits);
         if (cross.QtyCanon <= 0)
         {
-            return Reject(RejectReason.RejectThreshold, cross, askTob, bidTob, tobBps);
+            return Unpriced(RejectReason.RejectThreshold, cross, askTob, bidTob, tobBps);
         }
 
         long units = ctx.Grid.UnitsFloor(cross.QtyCanon);
         if (units <= 0)
         {
-            return Reject(RejectReason.RejectMinNotional, cross, askTob, bidTob, tobBps);
+            return Unpriced(RejectReason.RejectMinNotional, cross, askTob, bidTob, tobBps);
         }
 
         long sellLots = units * ctx.Grid.LotsPerUnitB;
@@ -170,12 +179,12 @@ public static class SpatialArbPricer
         VwapFill sellFill = VwapWalker.WalkLots(bids, sellLots, p.HaircutPpm);
         if (!buyFill.IsComplete || !sellFill.IsComplete)
         {
-            return Reject(RejectReason.RejectThreshold, cross, askTob, bidTob, tobBps);
+            return Unpriced(RejectReason.RejectThreshold, cross, askTob, bidTob, tobBps);
         }
 
         if (!buy.MeetsMinimumsExact(buyLots, buyFill.NotionalUnits) || !sell.MeetsMinimumsExact(sellLots, sellFill.NotionalUnits))
         {
-            return Reject(RejectReason.RejectMinNotional, cross, askTob, bidTob, tobBps);
+            return Unpriced(RejectReason.RejectMinNotional, cross, askTob, bidTob, tobBps);
         }
 
         double buyVwap = buyFill.CanonicalVwap(buy);
@@ -205,6 +214,7 @@ public static class SpatialArbPricer
         return new SpatialQuote
         {
             Decision = edge.NetQuote >= p.MinProfitQuote ? RejectReason.Execute : RejectReason.RejectThreshold,
+            HasExecutionPricing = true,
             Stop = cross.Stop,
             BuyTobPx = askTob,
             SellTobPx = bidTob,
@@ -226,13 +236,20 @@ public static class SpatialArbPricer
         };
     }
 
-    private static SpatialQuote Reject(RejectReason reason, in CrossResult cross, double askTob, double bidTob, double tobBps) => new()
+    /// <summary>Reject before both legs were walked: execution columns NaN / 0 levels (→ NULL), TOB when known.</summary>
+    private static SpatialQuote Unpriced(RejectReason reason, in CrossResult cross, double askTob, double bidTob, double tobBps) => new()
     {
         Decision = reason,
+        HasExecutionPricing = false,
         Stop = cross.Stop,
         BuyTobPx = askTob,
         SellTobPx = bidTob,
         TobEdgeBps = tobBps,
+        BuyVwap = double.NaN,
+        SellVwap = double.NaN,
+        BuyWorstPx = double.NaN,
+        SellWorstPx = double.NaN,
         OptimizerQtyCanon = cross.QtyCanon,
+        Edge = EdgeBreakdown.NotComputed,
     };
 }

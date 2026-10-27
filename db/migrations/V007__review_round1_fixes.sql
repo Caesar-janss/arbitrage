@@ -268,6 +268,34 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 -- ---------------------------------------------------------------------
+-- R-15: quote yang ditolak sebelum kedua kaki di-walk tidak punya VWAP /
+-- worst px / level / edge. Kolom-kolom itu NULL untuk reject (SpatialQuote:
+-- NaN → NULL) dan WAJIB hanya untuk EXECUTE. Tanpa ini satu baris reject
+-- menggagalkan seluruh batch COPY (termasuk baris EXECUTE).
+-- ---------------------------------------------------------------------
+ALTER TABLE trd.opportunity
+    ALTER COLUMN qty_base              DROP NOT NULL,
+    ALTER COLUMN buy_vwap_px           DROP NOT NULL,
+    ALTER COLUMN sell_vwap_px          DROP NOT NULL,
+    ALTER COLUMN buy_worst_px          DROP NOT NULL,
+    ALTER COLUMN sell_worst_px         DROP NOT NULL,
+    ALTER COLUMN buy_levels            DROP NOT NULL,
+    ALTER COLUMN sell_levels           DROP NOT NULL,
+    ALTER COLUMN gross_edge_bps        DROP NOT NULL,
+    ALTER COLUMN fee_cost_quote        DROP NOT NULL,
+    ALTER COLUMN slippage_buffer_quote DROP NOT NULL,
+    ALTER COLUMN rebalance_cost_quote  DROP NOT NULL,
+    ALTER COLUMN expected_net_quote    DROP NOT NULL;
+ALTER TABLE trd.opportunity ADD CONSTRAINT opportunity_execute_complete CHECK (
+    decision <> 'EXECUTE' OR (
+        qty_base IS NOT NULL AND buy_vwap_px IS NOT NULL AND sell_vwap_px IS NOT NULL
+        AND buy_worst_px IS NOT NULL AND sell_worst_px IS NOT NULL
+        AND buy_levels IS NOT NULL AND sell_levels IS NOT NULL
+        AND gross_edge_bps IS NOT NULL AND fee_cost_quote IS NOT NULL
+        AND slippage_buffer_quote IS NOT NULL AND rebalance_cost_quote IS NOT NULL
+        AND expected_net_quote IS NOT NULL));
+
+-- ---------------------------------------------------------------------
 -- R-10: transisi yang dibutuhkan risk code saat posisi ditahan
 -- (mirror TradeStateMachine.TransitionList; dites oleh TradeStateMachineTests)
 -- ---------------------------------------------------------------------

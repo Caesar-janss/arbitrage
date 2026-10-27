@@ -373,3 +373,24 @@ jadi datanya dikumpulkan di CI: job manual `seqlock-arm64` (`df8d55e`) = listing
 - **HIJAU**: `R14_DustAcceptanceTests 4 passed`, `R14_FlatDefinitionBehaviourTests 1 passed`; full suite `232 passed, 0 failed`;
   DB: `PASS R-14: dust yang diterima engine = flat di DB`, `realized … = -1.1952`, `dust_accepted_quote = 4.8`,
   `loss streak … = 3`, `fill terlambat → tidak flat`, `ALL TESTS PASSED` (assert lama, termasuk streak, tidak berubah).
+
+## R-15 (S3) — quote yang ditolak tidak bisa disimpan di `trd.opportunity`
+
+- **Test C#**: `Regression/R15_RejectQuoteFieldsTests.cs` (2, API lama), `Regression/R15_OpportunityRowContractTests.cs`
+  (3, API baru + teks migrasi), skenario P20. **Test SQL**: opportunity 601 (near-miss), 602 (stale), 603 (EXECUTE tidak lengkap).
+- **MERAH (perilaku, C#)**:
+  ```
+  FAIL …NearMiss_RejectThreshold_HasTobButNoFakeZeroVwap   vwap 0/0
+  FAIL …StaleBook_RejectStale_HasNoFakeZeroPrices          tob 0/0
+  TOTAL: 0 passed, 2 failed
+  ```
+- **MERAH (compile, C#)**: `'SpatialQuote' does not contain a definition for 'HasExecutionPricing'`.
+- **MERAH (SQL)**: `ERROR: null value in column "qty_base" of relation "opportunity_20261022" violates not-null constraint`.
+- **Patch**:
+  - C#: kontrak persistensi: nilai yang tidak dihitung = NaN (→ NULL), tidak pernah 0; `SpatialQuote.HasExecutionPricing`;
+    reject sebelum walk memakai `EdgeBreakdown.NotComputed` (NaN) dan tetap membawa TOB bila diketahui.
+  - SQL (`V007`): 12 kolom eksekusi `DROP NOT NULL`; constraint `opportunity_execute_complete` mewajibkannya hanya untuk
+    EXECUTE (constraint level tabel partisi, berlaku ke semua partisi).
+- **HIJAU**: `R15_OpportunityRowContractTests 3 passed`, `R15_RejectQuoteFieldsTests 2 passed`; full suite `237 passed, 0 failed`;
+  DB `PASS R-15: reject tanpa VWAP tersimpan … = 2`, `funnel tetap terhitung`, `EXECUTE tanpa VWAP ditolak → 23514
+  (opportunity_execute_complete)`, `ALL TESTS PASSED`.

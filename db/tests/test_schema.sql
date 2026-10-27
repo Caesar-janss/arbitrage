@@ -709,6 +709,22 @@ SELECT pg_temp.assert_eq('R-14: loss streak menghitung trade dust & terminal-tak
 SELECT pg_temp.fill(10122, '1012-3', 60000, 0.00001, 0, 'USDT', 0, '2026-10-22 12:30:00.051+00');
 SELECT pg_temp.assert_true('R-14: fill terlambat → tidak flat & muncul di v_open_exposure',
        EXISTS (SELECT 1 FROM rpt.v_open_exposure WHERE trade_id = 1012 AND NOT is_flat));
+
+-- R-15: baris reject dari SpatialArbPricer (kolom yang tidak dihitung = NULL) harus bisa disimpan;
+--       EXECUTE tetap wajib lengkap.
+INSERT INTO trd.opportunity (opportunity_id, detected_at, run_id, strategy, canonical_asset,
+    buy_instrument_id, sell_instrument_id, buy_tob_px, sell_tob_px, buy_book_age_us, sell_book_age_us, decision)
+VALUES (601, '2026-10-22 13:00:00+00', 1, 'SPATIAL', 'BTC', 1, 2, 60000, 60010, 1000, 1200, 'REJECT_THRESHOLD'),  -- near-miss
+       (602, '2026-10-22 13:00:01+00', 1, 'SPATIAL', 'BTC', 1, 2, NULL,  NULL,  1000, 900000, 'REJECT_STALE');    -- book resync
+SELECT pg_temp.assert_eq('R-15: reject tanpa VWAP tersimpan (near-miss + stale)',
+       (SELECT count(*) FROM trd.opportunity WHERE opportunity_id IN (601, 602)), 2);
+SELECT pg_temp.assert_true('R-15: funnel tetap terhitung dengan kolom NULL',
+       (SELECT n >= 1 FROM rpt.v_opportunity_funnel WHERE day_utc = '2026-10-22' AND decision = 'REJECT_STALE'));
+SELECT pg_temp.expect_error_like('R-15: EXECUTE tanpa VWAP ditolak',
+  $q$INSERT INTO trd.opportunity (opportunity_id, detected_at, run_id, strategy, canonical_asset,
+      buy_instrument_id, sell_instrument_id, buy_book_age_us, sell_book_age_us, decision)
+     VALUES (603, '2026-10-22 13:00:02+00', 1, 'SPATIAL', 'BTC', 1, 2, 1000, 1000, 'EXECUTE')$q$,
+  '23514', '%opportunity_execute_complete%');
 ROLLBACK;
 
 -- =====================================================================
