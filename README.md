@@ -22,7 +22,8 @@ docs/                        ARCHITECTURE.md, STAGE1_CORE.md
 ```
 
 ## Tim & review
-Alur kerja tim (Jansen, Claude, ChatGPT; Gemini keluar 2026-10-27): `docs/TEAM_WORKFLOW.md`. Paket review satu-file per reviewer:
+Alur kerja tim (Jansen, Claude, ChatGPT; Gemini keluar 2026-10-27): `docs/TEAM_WORKFLOW.md`. Claude dan ChatGPT membaca repo
+langsung; review dilakukan sebagai komentar di PR. Paket review satu-file hanya cadangan:
 ```bash
 python3 tools/make_review_packet.py --profile chatgpt --stage "Tahap 1 (Arb.Core)"
 ```

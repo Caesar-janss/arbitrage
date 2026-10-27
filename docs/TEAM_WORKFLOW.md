@@ -7,6 +7,10 @@ Tim: **Jansen** (satu-satunya manusia: owner, keputusan, akun/key, ops) · **Cla
 independen, satu-satunya model di luar keluarga Claude) · **Claude-R** (agen Claude terpisah dengan konteks kosong,
 dijalankan Claude untuk review).
 
+**Akses repo:** Claude dan ChatGPT sama-sama tersambung langsung ke `Caesar-janss/arbitrage` (GitHub App / connector).
+Hak tulis kode hanya untuk builder lewat branch + PR. Reviewer hanya membaca kode dan menulis **komentar/review PR**,
+tanpa commit, push, atau merge.
+
 ## 0. Lima aturan inti (disepakati ketiga proposal awal)
 1. **Satu pemilik per modul.** Dua anggota tidak menulis file yang sama di tahap yang sama.
 2. **Reviewer tidak commit.** Patch reviewer masuk sebagai *temuan* dan ikut triase.
@@ -36,18 +40,20 @@ CI GitHub (`.github/workflows/ci.yml`) adalah wasit akhir "test lulus" untuk sem
 punya blind spot yang sama. Mitigasinya: re-review ChatGPT **wajib** untuk S1 sebelum merge, dan CI/test kontrak tetap
 menjadi wasit.
 
-## 3. Alur satu tahap (paling sedikit copy-paste untuk Jansen)
+## 3. Alur satu tahap (tanpa copy-paste: kedua AI membaca repo langsung)
 ```
 Jansen: keputusan/spek (Q:A:)
-  → Claude: build + test → STAGEx doc → paket review (1 file per reviewer, ber-hash versi)
+  → Claude: build + test → STAGEx doc → push branch → (draft) PR #N
   → paralel, timebox 48 jam:
-       Claude-R (otomatis) │ ChatGPT (Jansen upload 1 file) │ CI GitHub
-  → Jansen kirim balik jawaban ChatGPT apa adanya (file .md, isi temuan lengkap; bukan ringkasan instruksi)
-  → Claude: triase CONFIRMED/REJECTED/NEEDS-DATA/DUPLICATE → fix + test → FINDINGS_LOG
-  → reviewer cek ulang fix S1 → CI hijau → Jansen merge → gate tahap berikutnya
+       Claude-R (otomatis) │ ChatGPT: review PR #N pada commit <sha> langsung dari repo │ CI GitHub
+  → ChatGPT menulis temuan LENGKAP sebagai review/komentar di PR #N (format FINDINGS_TEMPLATE, ID C-xx, sebut <sha>)
+  → Claude membaca komentar PR lewat API → triase CONFIRMED/REJECTED/NEEDS-DATA/DUPLICATE → fix + test → FINDINGS_LOG
+  → ChatGPT cek ulang fix S1 di PR yang sama → CI hijau → Jansen merge → gate tahap berikutnya
 ```
-Relay Jansen per tahap: **1 upload keluar, 1 file balik** (sebelumnya 2 + 2 dengan Gemini). Spek/prompt tidak perlu
-dioper bolak-balik antar AI.
+Relay Jansen per tahap: **satu pesan pendek ke ChatGPT** ("review PR #N @ <sha>, tulis temuan sebagai komentar PR").
+Tidak ada file yang dioper. Kalau connector ChatGPT ternyata read-only (tidak bisa berkomentar), fallback: ChatGPT
+menulis temuan lengkap ke file `.md`, Jansen upload 1 file ke Claude. Paket review (`tools/make_review_packet.py`) kini
+hanya cadangan untuk reviewer tanpa akses repo.
 
 ## 4. Serah-terima (wajib di setiap PR/zip — diadopsi dari proposal ChatGPT)
 1. Versi dasar (hash) dan tugas yang dikerjakan.
@@ -68,6 +74,11 @@ Format: `docs/review/FINDINGS_TEMPLATE.md` (prefix C/R/J; prefix G tidak dipakai
 S1 wajib selesai sebelum tahap berikutnya.
 
 ## 6. Keamanan & live trading (satu manusia → pengganti two-person rule)
+- **Akses AI ke GitHub dibatasi ke repo ini saja** ("Only select repositories" → `Caesar-janss/arbitrage`), untuk GitHub
+  App Claude maupun connector ChatGPT. Akun/org lain (termasuk org kantor) tidak boleh ikut ter-otorisasi.
+- **`main` hanya berubah lewat PR yang di-merge Jansen.** AI tidak push ke `main`. Bila paket akun mengizinkan (GitHub
+  Pro/Team untuk repo private), aktifkan ruleset: require pull request + status check `build-test` & `db-schema`, block
+  force push. Status 2026-10-27: `main` belum terproteksi.
 - API key: **trade only, withdraw OFF**, IP whitelist ke VPS; hanya di env/secret store VPS.
 - `tools/make_review_packet.py` hanya memuat whitelist dan **berhenti** jika ada konten mirip credential.
 - Mengaktifkan live (`IsPaperTrading=false`) butuh **ketiganya**:
@@ -104,6 +115,7 @@ Peran dirotasi berdasarkan angka ini.
 ## 9. Keputusan (pemilik: Jansen)
 Q: Gemini tetap di tim? A: **Tidak** (2026-10-27): tidak bisa akses repo, relay manual tidak sepadan dengan waktunya.
 Project dikerjakan Claude + ChatGPT (peran di §2).
+Q: ChatGPT akses repo? A: **Ya**, tersambung langsung ke repo (2026-10-27) → review dilakukan di PR, bukan lewat paket.
 
 Terbuka:
 - Pasangan venue spatial (opsi a/b/c, `STAGE1_CORE.md` §5), setelah data probe latency.

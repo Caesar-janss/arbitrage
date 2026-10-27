@@ -13,7 +13,8 @@ Patch v0.3 tidak mengubah status ini. (Syarat (3) semula "review Gemini". Gemini
 `TEAM_WORKFLOW.md` §9.)
 
 Progres syarat penutupan (2026-10-27): (1) **terpenuhi** untuk Claude-R (semua S1/S2 + S3/S4 juga); (2) **belum**: isi
-C-01/C-02 belum diterima; (3) **belum**: re-review ChatGPT v0.3; (4) **belum**. Versi untuk ronde review berikutnya: v0.3,
+C-01/C-02 belum diterima (ChatGPT diminta menulisnya ulang sebagai komentar di PR #2); (3) **belum**: re-review ChatGPT
+v0.3 di PR #2; (4) **belum**. Versi untuk ronde review berikutnya: v0.3,
 `make_review_packet.py --version` = `9be7565c2c7f`.
 
 Detail tiap temuan Claude-R: `docs/review/stage1/R_claude-r.md`. ChatGPT: lihat bagian di bawah. Gemini: keluar dari tim
