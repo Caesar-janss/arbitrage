@@ -8,8 +8,11 @@ namespace Arb.Core.Execution;
 /// Owned by the executor thread; pooled (call <see cref="Initialize"/> to reuse, no per-trade allocation).
 /// For funding strategies "Buy" = long leg, "Sell" = short leg.
 ///
-/// Exposure has two parts and BOTH must be zero before a terminal state (COMPLETED / REPAIRED / CLOSED):
-///   * net delta  = Σ base bought − Σ base sold − base-asset fees (all instruments of the trade);
+/// Exposure has two parts; a terminal state (COMPLETED / REPAIRED / CLOSED) needs both accounted for:
+///   * net delta  = Σ base bought − Σ base sold − base-asset fees (all instruments of the trade). It must equal the
+///     residual EXPLICITLY accepted as dust (<see cref="AcceptResidualAsDust"/>: below every venue's minimum, or within
+///     RepairPolicy.DustCanon) — usually 0. The accepted amount is persisted as trd.trade_group.dust_accepted_base and
+///     the DB's is_flat uses the same rule, so C# and SQL share ONE definition of flat (R-14);
 ///   * gross perp = the signed position on EVERY perp instrument the trade traded (entry legs and hedges). A spatial
 ///     residual hedged on a perp has delta 0 but two open positions (R-02): it is POSITION_OPEN, not REPAIRED.
 /// </summary>
@@ -54,6 +57,9 @@ public sealed class TradeGroup
 
     public decimal CashFlowQuote => SellNotional - BuyNotional - NonBaseFeesQuote;
 
+    /// <summary>Signed residual written off as untradeable dust (0 = none). Persist as trd.trade_group.dust_accepted_base.</summary>
+    public decimal DustAcceptedCanon { get; private set; }
+
     public void Initialize(long tradeId, StrategyKind strategy, InstrumentKey buy, InstrumentKey sell, decimal targetQtyCanon, long createdAtMicros)
     {
         if (tradeId <= 0)
@@ -83,6 +89,7 @@ public sealed class TradeGroup
         BuyNotional = 0m;
         SellNotional = 0m;
         NonBaseFeesQuote = 0m;
+        DustAcceptedCanon = 0m;
         _perpCount = 0;
         Array.Clear(_perpNet);
     }
@@ -175,9 +182,17 @@ public sealed class TradeGroup
     {
         if (_state.State != 0 && TradeStateMachine.IsAllowed(_state.State, to))
         {
-            if ((to is TradeState.Completed or TradeState.Repaired or TradeState.Closed) && HasOpenPerpPosition)
+            if (to is TradeState.Completed or TradeState.Repaired or TradeState.Closed)
             {
-                return TransitionError.OpenDerivativePosition;
+                if (HasOpenPerpPosition)
+                {
+                    return TransitionError.OpenDerivativePosition;
+                }
+
+                if (NetBaseDelta != DustAcceptedCanon)
+                {
+                    return TransitionError.UnacceptedResidual;
+                }
             }
 
             if (Strategy == StrategyKind.Spatial && to == TradeState.PositionOpen && !HasOpenPerpPosition)
@@ -192,8 +207,26 @@ public sealed class TradeGroup
     /// <summary>|net delta| ≤ dust (funding POSITION_OPEN is delta-neutral but not flat).</summary>
     public bool IsDeltaNeutral(decimal dustCanon) => Math.Abs(NetBaseDelta) <= dustCanon;
 
-    /// <summary>No exposure at all: delta within dust AND no open perp position (exact: perp positions are whole lots).</summary>
-    public bool IsFlat(decimal dustCanon) => IsDeltaNeutral(dustCanon) && !HasOpenPerpPosition;
+    /// <summary>
+    /// No exposure left: no open perp AND |net delta − accepted dust| ≤ <paramref name="toleranceCanon"/>. Terminal states
+    /// require tolerance 0, i.e. the residual is either zero or explicitly accepted (<see cref="AcceptResidualAsDust"/>).
+    /// </summary>
+    public bool IsFlat(decimal toleranceCanon) => !HasOpenPerpPosition && Math.Abs(NetBaseDelta - DustAcceptedCanon) <= toleranceCanon;
+
+    /// <summary>
+    /// Write the CURRENT net delta off as dust (call only when RepairPlanner says Flat or BelowVenueMinimum, and the value is
+    /// within the dust budget). Returns the accepted amount. A perp position is never dust.
+    /// </summary>
+    public decimal AcceptResidualAsDust()
+    {
+        if (HasOpenPerpPosition)
+        {
+            throw new InvalidOperationException($"trade {TradeId}: an open perp position cannot be accepted as dust");
+        }
+
+        DustAcceptedCanon = NetBaseDelta;
+        return DustAcceptedCanon;
+    }
 
     private void AddPerp(InstrumentKey perp, decimal signedQty)
     {

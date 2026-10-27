@@ -89,6 +89,9 @@ public readonly struct RepairPlan
     /// <summary>Residual left after this order because it is below one lot of the chosen venue.</summary>
     public double UntradeableCanon { get; init; }
 
+    /// <summary>Flat / BelowVenueMinimum: |residual| × reference price — what accepting it as dust writes off (alert above budget).</summary>
+    public double DustQuote { get; init; }
+
     public double ExpectedVwap { get; init; }
 
     /// <summary>Expected loss vs. reference price (+ = loss), incl. fee and ExtraCostBps.</summary>
@@ -138,7 +141,7 @@ public static class RepairPlanner
         decimal absResExact = Math.Abs(netBaseDelta);
         if (absRes <= policy.DustCanon)
         {
-            return new RepairPlan { Verdict = RepairVerdict.Flat, ResidualCanon = residual, CandidateIndex = -1 };
+            return new RepairPlan { Verdict = RepairVerdict.Flat, ResidualCanon = residual, CandidateIndex = -1, DustQuote = absRes * referencePx };
         }
 
         Side side = residual > 0 ? Side.Sell : Side.Buy;
@@ -217,6 +220,7 @@ public static class RepairPlanner
                 ResidualCanon = residual,
                 UntradeableCanon = absRes,
                 CandidateIndex = -1,
+                DustQuote = anyBelowMinimum ? absRes * referencePx : 0,
             };
         }
 

@@ -677,6 +677,38 @@ SELECT pg_temp.trans(1011, 'POSITION_OPEN', '2026-10-22 13:00:00.050+00');
 SELECT pg_temp.trans(1011, 'STUCK',         '2026-10-22 16:00:00+00', 'venue down saat menahan posisi');
 SELECT pg_temp.assert_true('R-10: POSITION_OPEN → STUCK (bukan terminal, closed_at NULL)',
        (SELECT state = 'STUCK' AND closed_at IS NULL FROM trd.trade_group WHERE trade_id = 1011));
+
+-- R-14: SATU definisi flat. Residual 0.00008 BTC (4.8 USDT) < min notional Binance → engine menerimanya sebagai dust
+--       (TradeGroup.AcceptResidualAsDust → dust_accepted_base). v0.2: |4.8| > dust_quote 1.0 → tidak flat selamanya,
+--       realized NULL, tidak terhitung di loss streak, muncul lagi di v_open_exposure setiap startup.
+SELECT pg_temp.trade(1012, 1, 'SPATIAL', 'BTC', 1, 2, 0.01, 60000, 60000, 1.2, 0.01, '2026-10-22 12:30:00+00');
+SELECT pg_temp.ord(10121, 1012, 'ENTRY_BUY',  1, 'BUY',  60005, 0.01, '2026-10-22 12:30:00.001+00');
+SELECT pg_temp.ord(10122, 1012, 'ENTRY_SELL', 2, 'SELL', 59995, 0.01, '2026-10-22 12:30:00.001+00');
+SELECT pg_temp.trans(1012, 'IN_FLIGHT', '2026-10-22 12:30:00.002+00');
+SELECT pg_temp.rpt(10121, 'FILLED', 0.01, 60000, '2026-10-22 12:30:00.040+00');
+SELECT pg_temp.fill(10121, '1012-1', 60000, 0.01, 0.6, 'USDT', 0.6, '2026-10-22 12:30:00.039+00');
+SELECT pg_temp.rpt(10122, 'CANCELED', 0.00992, 60000, '2026-10-22 12:30:00.050+00');
+SELECT pg_temp.fill(10122, '1012-2', 60000, 0.00992, 0.5952, 'USDT', 0.5952, '2026-10-22 12:30:00.049+00');
+SELECT pg_temp.trans(1012, 'RESIDUAL',  '2026-10-22 12:30:00.060+00', 'sell 99.2%');
+UPDATE trd.trade_group SET repair_method = 'UNWIND' WHERE trade_id = 1012;
+SELECT pg_temp.trans(1012, 'REPAIRING', '2026-10-22 12:30:00.061+00');
+UPDATE trd.trade_group SET dust_accepted_base = 0.00008 WHERE trade_id = 1012; -- BelowVenueMinimum → dust
+SELECT pg_temp.trans(1012, 'REPAIRED',  '2026-10-22 12:30:00.300+00', 'residual 0.00008 BTC diterima sebagai dust');
+SELECT pg_temp.assert_true('R-14: dust yang diterima engine = flat di DB',
+       (SELECT is_flat FROM rpt.v_trade_ledger WHERE trade_id = 1012));
+SELECT pg_temp.assert_eq('R-14: realized termasuk nilai dust (cash − 5.9952 + 0.00008 × 60000)',
+       (SELECT realized_pnl_quote FROM rpt.v_trade_ledger WHERE trade_id = 1012), -1.1952);
+SELECT pg_temp.assert_eq('R-14: dust_accepted_quote terlihat untuk monitoring',
+       (SELECT dust_accepted_quote FROM rpt.v_trade_ledger WHERE trade_id = 1012), 4.8);
+SELECT pg_temp.assert_true('R-14: dust trade tidak muncul di v_open_exposure',
+       NOT EXISTS (SELECT 1 FROM rpt.v_open_exposure WHERE trade_id = 1012));
+-- loss streak SPATIAL sejak reset operator 06:00: 1012 (rugi), 1009 (REPAIRED tak flat = PnL tak diketahui → rugi), 1008 (rugi)
+SELECT pg_temp.assert_eq('R-14: loss streak menghitung trade dust & terminal-tak-flat',
+       risk.fn_consecutive_losses('LIVE', 'SPATIAL'), 3);
+-- fill terlambat setelah dust diterima → tidak flat lagi (rekonsiliasi harus melihatnya)
+SELECT pg_temp.fill(10122, '1012-3', 60000, 0.00001, 0, 'USDT', 0, '2026-10-22 12:30:00.051+00');
+SELECT pg_temp.assert_true('R-14: fill terlambat → tidak flat & muncul di v_open_exposure',
+       EXISTS (SELECT 1 FROM rpt.v_open_exposure WHERE trade_id = 1012 AND NOT is_flat));
 ROLLBACK;
 
 -- =====================================================================

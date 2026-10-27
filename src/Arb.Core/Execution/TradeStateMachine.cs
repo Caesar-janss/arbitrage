@@ -15,6 +15,9 @@ public enum TransitionError : byte
 
     /// <summary>SPATIAL → POSITION_OPEN requested without an open perp hedge (TradeGroup).</summary>
     NotHedged = 6,
+
+    /// <summary>Terminal state requested while net delta ≠ the residual explicitly accepted as dust (TradeGroup, R-14).</summary>
+    UnacceptedResidual = 7,
 }
 
 /// <summary>

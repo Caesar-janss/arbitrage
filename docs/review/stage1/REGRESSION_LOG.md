@@ -349,3 +349,27 @@ jadi datanya dikumpulkan di CI: job manual `seqlock-arm64` (`df8d55e`) = listing
   max(journal, max id node di DB) + margin untuk ID yang terbit tetapi belum tersimpan.
 - **HIJAU**: `R17_SnowflakeRestartTests 3 passed` (5.000 ID sebelum + 5.000 sesudah restart, tanpa duplikat);
   full suite `227 passed, 0 failed`.
+
+## R-14 (S3) — tiga definisi "flat" (C# dust, minimum venue, 1 USDT di DB)
+
+- **Test C#**: `Regression/R14_FlatDefinitionBehaviourTests.cs` (1, API lama), `Regression/R14_DustAcceptanceTests.cs` (4, API baru),
+  skenario P13. **Test SQL**: trade 1012 di blok regression (residual 0,00008 BTC = 4,8 USDT < min notional 5).
+- **MERAH (perilaku, C#)**:
+  ```
+  FAIL …Terminal_WithAnUnaccountedResidual_IsRefused   REPAIRED accepted with 0.00008 BTC unaccounted
+  TOTAL: 0 passed, 1 failed
+  ```
+- **MERAH (compile, C#)**: `'TransitionError' does not contain a definition for 'UnacceptedResidual'`, `'TradeGroup' does not contain
+  a definition for 'AcceptResidualAsDust'` / `'DustAcceptedCanon'`, `'RepairPlan' does not contain a definition for 'DustQuote'`.
+- **MERAH (SQL)**: tanpa kolom baru → `ERROR: column "dust_accepted_base" of relation "trade_group" does not exist`; probe dengan
+  baris UPDATE dihapus (perilaku v0.2) → `FAIL  R-14: dust yang diterima engine = flat di DB  (got f)` (4,8 > dust_quote 1,0).
+- **Patch**:
+  - C#: `TradeGroup.AcceptResidualAsDust()` mencatat residual yang di-write-off (perp tidak pernah boleh jadi dust);
+    `IsFlat` = tanpa perp terbuka **dan** |delta − dust diterima| ≤ toleransi; terminal mewajibkan toleransi 0
+    (`UnacceptedResidual`); `RepairPlan.DustQuote` untuk alert.
+  - SQL (`V007`): `trade_group.dust_accepted_base`; `is_flat` = `net_base_delta = COALESCE(dust_accepted_base, 0)` dan
+    `open_perp_qty_base = 0` (aturan yang sama dengan C#); `dust_quote` kini hanya ambang alert (`dust_over_limit`);
+    `fn_consecutive_losses` menghitung trade terminal yang tidak flat sebagai rugi (PnL tidak diketahui).
+- **HIJAU**: `R14_DustAcceptanceTests 4 passed`, `R14_FlatDefinitionBehaviourTests 1 passed`; full suite `232 passed, 0 failed`;
+  DB: `PASS R-14: dust yang diterima engine = flat di DB`, `realized … = -1.1952`, `dust_accepted_quote = 4.8`,
+  `loss streak … = 3`, `fill terlambat → tidak flat`, `ALL TESTS PASSED` (assert lama, termasuk streak, tidak berubah).

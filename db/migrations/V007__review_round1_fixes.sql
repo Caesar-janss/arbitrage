@@ -93,8 +93,21 @@ END
 $$;
 
 -- ---------------------------------------------------------------------
--- Ledger: is_flat = delta ≤ dust DAN tidak ada posisi perp terbuka (R-02).
--- Kolom baru ditambahkan di AKHIR (syarat CREATE OR REPLACE VIEW).
+-- R-14: SATU definisi flat, milik engine. TradeGroup.AcceptResidualAsDust
+-- menulis residual yang di-write-off (di bawah minimum venue / ≤ DustCanon)
+-- ke dust_accepted_base. Flat ⇔ tidak ada perp terbuka DAN
+-- net_base_delta = dust_accepted_base (eksak; NULL = 0). ref.setting
+-- dust_quote tidak lagi menentukan is_flat: hanya ambang ALERT nilai dust.
+-- ---------------------------------------------------------------------
+ALTER TABLE trd.trade_group ADD COLUMN dust_accepted_base ref.amt;   -- signed canonical base, NULL = tidak ada
+UPDATE ref.setting
+   SET note = 'Ambang ALERT nilai dust yang diterima engine (v_trade_ledger.dust_over_limit); tidak lagi dipakai untuk is_flat (R-14)'
+ WHERE key = 'dust_quote';
+
+-- ---------------------------------------------------------------------
+-- Ledger: is_flat = (net delta = dust yang diterima engine) DAN tidak ada
+-- posisi perp terbuka (R-02, R-14). Kolom baru di AKHIR (syarat CREATE OR
+-- REPLACE VIEW).
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW rpt.v_trade_ledger AS
 WITH fx AS (
@@ -176,8 +189,9 @@ WITH fx AS (
     SELECT b.*,
            b.gross_cash_quote - b.fee_cash_quote + b.funding_quote          AS cash_flow_quote,
            b.net_base_delta * COALESCE(b.last_fill_px, 0)                   AS residual_quote,
-           abs(b.net_base_delta * COALESCE(b.last_fill_px, 0)) <= ref.fn_setting('dust_quote')
-             AND b.open_perp_qty_base = 0                                   AS is_flat
+           b.net_base_delta = COALESCE(b.dust_accepted_base, 0)
+             AND b.open_perp_qty_base = 0                                   AS is_flat,
+           COALESCE(b.dust_accepted_base, 0) * COALESCE(b.last_fill_px, 0)  AS dust_accepted_quote
     FROM base b
 )
 SELECT c.trade_id, c.run_id, c.mode, c.strategy, c.canonical_asset, c.quote_asset,
@@ -207,7 +221,10 @@ SELECT c.trade_id, c.run_id, c.mode, c.strategy, c.canonical_asset, c.quote_asse
        c.position_open_at,
        c.n_fills, c.any_simulated,
        -- v0.3 (kolom baru di akhir)
-       c.open_perp_qty_base
+       c.open_perp_qty_base,
+       c.dust_accepted_base,
+       c.dust_accepted_quote,
+       abs(c.dust_accepted_quote) > ref.fn_setting('dust_quote')              AS dust_over_limit
 FROM calc c;
 
 CREATE OR REPLACE VIEW rpt.v_open_exposure AS
@@ -219,6 +236,36 @@ SELECT l.trade_id, l.mode, l.strategy, l.state, l.canonical_asset,
        l.open_perp_qty_base
 FROM rpt.v_trade_ledger l
 WHERE NOT l.is_terminal OR NOT l.is_flat;
+
+-- ---------------------------------------------------------------------
+-- R-14: loss streak juga menghitung trade terminal yang TIDAK flat (PnL
+-- tidak diketahui → dianggap rugi; v0.2 melewatinya karena realized NULL).
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION risk.fn_consecutive_losses(
+    p_mode     text DEFAULT 'LIVE',
+    p_strategy text DEFAULT NULL)
+RETURNS integer
+LANGUAGE sql STABLE AS $$
+    WITH reset AS (
+        SELECT COALESCE(max(cleared_at), '-infinity'::timestamptz) AS since
+        FROM risk.halt_state
+        WHERE reason_code = 'CONSECUTIVE_LOSS' AND cleared_at IS NOT NULL
+    ), t AS (
+        SELECT l.closed_at, l.trade_id,
+               (l.realized_pnl_quote IS NULL OR l.realized_pnl_quote < 0) AS is_loss
+        FROM rpt.v_trade_ledger l, reset
+        WHERE l.mode = p_mode
+          AND (p_strategy IS NULL OR l.strategy = p_strategy)
+          AND l.state IN ('COMPLETED','REPAIRED','CLOSED','MANUAL_RESOLVED')
+          AND l.closed_at > reset.since
+    ), s AS (
+        SELECT is_loss,
+               sum(CASE WHEN is_loss THEN 0 ELSE 1 END)
+                   OVER (ORDER BY closed_at DESC, trade_id DESC ROWS UNBOUNDED PRECEDING) AS non_losses_seen
+        FROM t
+    )
+    SELECT count(*)::integer FROM s WHERE non_losses_seen = 0
+$$;
 
 -- ---------------------------------------------------------------------
 -- R-10: transisi yang dibutuhkan risk code saat posisi ditahan
