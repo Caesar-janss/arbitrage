@@ -73,6 +73,17 @@ public class R03_HaircutConsistentPricingTests
         Assert.Equal(q.SellLots, atLimit.FilledLots);
     }
 
+    [Theory]
+    [InlineData(1_000L, 700_000, 700L)]
+    [InlineData(999L, 700_000, 699L)]                                 // floor
+    [InlineData(9_223_372_036_854L, 999_999, 9_223_362_813_481L)]     // at the 64-bit fast-path limit
+    [InlineData(4_000_000_000_000_000L, 700_000, 2_800_000_000_000_000L)] // Int128 path
+    public void HaircutDepth_IsFlooredExactly_OnBothArithmeticPaths(long qty, int haircutPpm, long expected)
+    {
+        VwapFill f = VwapWalker.WalkLots(new[] { new PriceLevel(100, qty) }, long.MaxValue, haircutPpm);
+        Assert.Equal(expected, f.FilledLots);
+    }
+
     [Fact]
     public void FullLiquidity_IsUnchanged()
     {
