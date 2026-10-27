@@ -577,6 +577,89 @@ SELECT pg_temp.expect_error('order: cum_filled > req_qty',
 ROLLBACK;
 
 -- =====================================================================
+-- REGRESSION v0.3 — temuan review Tahap 1 (docs/review/stage1/REGRESSION_LOG.md).
+-- Di-rollback: skenario di sini tidak mengubah angka assertion di atas.
+-- =====================================================================
+\echo '--- regression v0.3 (di-rollback) ---'
+-- expect_error + cek isi pesan: assert yang lulus karena ALASAN LAIN (mis. transisi ilegal di tabel) = gagal (R-20)
+CREATE FUNCTION pg_temp.expect_error_like(p_label text, p_sql text, p_state text, p_like text)
+RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    BEGIN
+        EXECUTE p_sql;
+    EXCEPTION WHEN OTHERS THEN
+        IF SQLSTATE = p_state AND SQLERRM LIKE p_like THEN
+            RAISE NOTICE 'PASS  % → ditolak % (%)', p_label, SQLSTATE, SQLERRM;
+            RETURN;
+        END IF;
+        RAISE EXCEPTION 'FAIL  %  expected % LIKE % got % (%)', p_label, p_state, p_like, SQLSTATE, SQLERRM;
+    END;
+    RAISE EXCEPTION 'FAIL  %  expected error % tapi statement sukses', p_label, p_state;
+END $$;
+
+BEGIN;
+INSERT INTO ref.instrument (exchange_code, market_type, venue_symbol, base_asset, quote_asset,
+                            base_multiplier, tick_size, step_size, min_notional, funding_interval_h)
+VALUES ('BYBIT','PERP_LINEAR','BTCUSDT','BTC','USDT', 1, 0.1, 0.001, 5, 8);
+
+-- R-02: residual SPATIAL di-hedge di perp → POSITION_OPEN sampai spot DAN perp di-unwind (bukan REPAIRED)
+SELECT pg_temp.trade(1008, 1, 'SPATIAL', 'BTC', 3, 2, 0.01, 60000, 60120, 1.08, 0.07, '2026-10-22 11:00:00+00');
+SELECT pg_temp.ord(10081, 1008, 'ENTRY_BUY',  3, 'BUY',  60005, 0.01, '2026-10-22 11:00:00.001+00');
+SELECT pg_temp.ord(10082, 1008, 'ENTRY_SELL', 2, 'SELL', 60110, 0.01, '2026-10-22 11:00:00.001+00');
+SELECT pg_temp.trans(1008, 'IN_FLIGHT', '2026-10-22 11:00:00.002+00');
+SELECT pg_temp.rpt(10081, 'FILLED', 0.01, 60000, '2026-10-22 11:00:00.040+00');
+SELECT pg_temp.fill(10081, '1008-1', 60000, 0.01, 0.6, 'BGB', 0.48, '2026-10-22 11:00:00.039+00');
+SELECT pg_temp.rpt(10082, 'CANCELED', 0, NULL, '2026-10-22 11:00:00.060+00');
+SELECT pg_temp.trans(1008, 'RESIDUAL', '2026-10-22 11:00:00.061+00', 'sell leg IOC 0% fill');
+UPDATE trd.trade_group SET repair_method = 'PERP_HEDGE' WHERE trade_id = 1008;
+SELECT pg_temp.trans(1008, 'REPAIRING', '2026-10-22 11:00:00.062+00');
+SELECT pg_temp.ord(10083, 1008, 'REPAIR', pg_temp.inst('BYBIT','PERP_LINEAR','BTCUSDT'), 'SELL', 59930, 0.01, '2026-10-22 11:00:00.062+00');
+SELECT pg_temp.rpt(10083, 'FILLED', 0.01, 59990, '2026-10-22 11:00:00.090+00');
+SELECT pg_temp.fill(10083, '1008-2', 59990, 0.01, 0.329945, 'USDT', 0.329945, '2026-10-22 11:00:00.089+00');
+SELECT pg_temp.expect_error_like('R-02: hedge PERP_HEDGE tidak boleh berakhir REPAIRED',
+  $q$UPDATE trd.trade_group SET state='REPAIRED', state_version=state_version+1, state_changed_at='2026-10-22 11:00:00.095+00' WHERE trade_id=1008$q$,
+  'AR002', '%tidak boleh berakhir REPAIRED%');
+SELECT pg_temp.trans(1008, 'POSITION_OPEN', '2026-10-22 11:00:00.100+00', 'hedged: spot long + perp short');
+SELECT pg_temp.assert_true('R-02: delta 0 tetapi TIDAK flat (perp short terbuka)',
+       (SELECT net_base_delta = 0 AND NOT is_flat AND open_perp_qty_base = 0.01 FROM rpt.v_trade_ledger WHERE trade_id = 1008));
+SELECT pg_temp.assert_true('R-02: hedge terbuka terlihat di v_open_exposure (StartupRecovery)',
+       EXISTS (SELECT 1 FROM rpt.v_open_exposure WHERE trade_id = 1008 AND open_perp_qty_base = 0.01));
+SELECT pg_temp.trans(1008, 'EXITING', '2026-10-22 11:05:00+00', 'unwind hedge');
+SELECT pg_temp.ord(10084, 1008, 'EXIT_SELL', 3, 'SELL', 60000, 0.01, '2026-10-22 11:05:00.001+00');
+SELECT pg_temp.ord(10085, 1008, 'EXIT_BUY', pg_temp.inst('BYBIT','PERP_LINEAR','BTCUSDT'), 'BUY', 60010, 0.01, '2026-10-22 11:05:00.001+00');
+SELECT pg_temp.rpt(10084, 'FILLED', 0.01, 60010, '2026-10-22 11:05:00.040+00');
+SELECT pg_temp.fill(10084, '1008-3', 60010, 0.01, 0.48008, 'USDT', 0.48008, '2026-10-22 11:05:00.039+00');
+SELECT pg_temp.rpt(10085, 'FILLED', 0.01, 60000, '2026-10-22 11:05:00.041+00');
+SELECT pg_temp.fill(10085, '1008-4', 60000, 0.01, 0.33, 'USDT', 0.33, '2026-10-22 11:05:00.040+00');
+SELECT pg_temp.trans(1008, 'CLOSED', '2026-10-22 11:05:00.050+00');
+SELECT pg_temp.assert_eq('R-02: hedge ditutup → realized (fee 4 kaki)',
+       (SELECT realized_pnl_quote FROM rpt.v_trade_ledger WHERE trade_id = 1008), -1.620025);
+SELECT pg_temp.assert_true('R-02: setelah CLOSED tidak lagi di v_open_exposure',
+       NOT EXISTS (SELECT 1 FROM rpt.v_open_exposure WHERE trade_id = 1008));
+
+-- R-02: SPATIAL masuk POSITION_OPEN hanya dari REPAIRING dengan PERP_HEDGE
+SELECT pg_temp.trade(1009, 1, 'SPATIAL', 'BTC', 3, 2, 0.01, 60000, 60120, 1.08, 0.07, '2026-10-22 12:00:00+00');
+SELECT pg_temp.trans(1009, 'IN_FLIGHT', '2026-10-22 12:00:00.002+00');
+SELECT pg_temp.expect_error_like('R-02: SPATIAL IN_FLIGHT → POSITION_OPEN tetap ditolak',
+  $q$UPDATE trd.trade_group SET state='POSITION_OPEN', state_version=2, state_changed_at='2026-10-22 12:00:00.003+00' WHERE trade_id=1009$q$,
+  'AR002', '%SPATIAL hanya masuk POSITION_OPEN%');
+SELECT pg_temp.trans(1009, 'RESIDUAL', '2026-10-22 12:00:00.050+00');
+UPDATE trd.trade_group SET repair_method = 'UNWIND' WHERE trade_id = 1009;
+SELECT pg_temp.trans(1009, 'REPAIRING', '2026-10-22 12:00:00.051+00');
+SELECT pg_temp.expect_error_like('R-02: SPATIAL REPAIRING → POSITION_OPEN tanpa PERP_HEDGE ditolak',
+  $q$UPDATE trd.trade_group SET state='POSITION_OPEN', state_version=4, state_changed_at='2026-10-22 12:00:00.060+00' WHERE trade_id=1009$q$,
+  'AR002', '%dengan PERP_HEDGE (dari REPAIRING, metode UNWIND)%');
+
+-- R-02: label salah (repair_method UNWIND) tapi fill perp nyata → REPAIRED tetap terdeteksi sebagai eksposur terbuka
+SELECT pg_temp.ord(10091, 1009, 'REPAIR', pg_temp.inst('BYBIT','PERP_LINEAR','BTCUSDT'), 'SELL', 59930, 0.01, '2026-10-22 12:00:00.052+00');
+SELECT pg_temp.rpt(10091, 'FILLED', 0.01, 59990, '2026-10-22 12:00:00.080+00');
+SELECT pg_temp.fill(10091, '1009-1', 59990, 0.01, 0.329945, 'USDT', 0.329945, '2026-10-22 12:00:00.079+00');
+SELECT pg_temp.trans(1009, 'REPAIRED', '2026-10-22 12:00:00.090+00');
+SELECT pg_temp.assert_true('R-02: REPAIRED dengan perp terbuka tetap di v_open_exposure',
+       EXISTS (SELECT 1 FROM rpt.v_open_exposure WHERE trade_id = 1009 AND NOT is_flat AND open_perp_qty_base = 0.01));
+ROLLBACK;
+
+-- =====================================================================
 -- Snapshot hasil untuk inspeksi manual
 -- =====================================================================
 \echo ''

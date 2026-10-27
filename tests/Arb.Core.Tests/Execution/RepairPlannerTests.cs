@@ -183,11 +183,11 @@ public class TradeGroupTests
         var g = new TradeGroup();
         g.Initialize(1002, StrategyKind.Spatial, buy, sell, 0.01m, 0);
 
-        g.ApplyFill(Side.Buy, 0.01m, 600m, 0.00001m, FeeAssetKind.Base, 0.6m);
+        g.ApplyFill(buy, Side.Buy, 0.01m, 600m, 0.00001m, FeeAssetKind.Base, 0.6m);
         Assert.Equal(0.00999m, g.NetBaseDelta);
         Assert.False(g.IsFlat(0.000001m));
 
-        g.ApplyFill(Side.Sell, 0.00999m, 599.1003m, 0.5991003m, FeeAssetKind.Quote, 0.5991003m);
+        g.ApplyFill(buy, Side.Sell, 0.00999m, 599.1003m, 0.5991003m, FeeAssetKind.Quote, 0.5991003m); // unwind on the buy venue
         Assert.Equal(0m, g.NetBaseDelta);
         Assert.True(g.IsFlat(0m));
         Assert.Equal(-1.4988003m, g.CashFlowQuote); // == db/tests trade 1002 realized PnL
@@ -198,6 +198,6 @@ public class TradeGroupTests
         g.Initialize(1003, StrategyKind.Spatial, buy, sell, 0.005m, 10);
         Assert.Equal(0m, g.NetBaseDelta);
         Assert.Equal(TradeState.Created, g.State.State);
-        Assert.Throws<ArgumentOutOfRangeException>(() => g.ApplyFill(Side.Buy, 0m, 1m, 0m, FeeAssetKind.Quote, 0m));
+        Assert.Throws<ArgumentOutOfRangeException>(() => g.ApplyFill(buy, Side.Buy, 0m, 1m, 0m, FeeAssetKind.Quote, 0m));
     }
 }

@@ -140,7 +140,8 @@ public class ZeroAllocationTests
         AssertZeroAlloc("TradeGroup", () =>
         {
             group.Initialize(1, StrategyKind.Spatial, _m.BitgetBtcSpot.Key, _m.BybitBtcSpot.Key, 0.01m, 0);
-            group.ApplyFill(Side.Buy, 0.01m, 600m, 0.00001m, FeeAssetKind.Base, 0.6m);
+            group.ApplyFill(_m.BitgetBtcSpot.Key, Side.Buy, 0.01m, 600m, 0.00001m, FeeAssetKind.Base, 0.6m);
+            group.ApplyFill(_m.BybitBtcPerp.Key, Side.Sell, 0.01m, 600m, 0.33m, FeeAssetKind.Quote, 0.33m);
             group.TransitionTo(TradeState.InFlight, 1);
         });
 

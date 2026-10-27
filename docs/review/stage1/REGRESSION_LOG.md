@@ -47,3 +47,48 @@ di sandbox; lihat `STAGE1_CORE.md` §7). CI GitHub menjalankan xUnit asli pada c
   TOTAL: 9 passed, 0 failed
   full suite: TOTAL: 159 passed, 0 failed
   ```
+
+## R-02 (S1) — residual SPATIAL yang di-hedge perp berakhir REPAIRED, kaki terbuka tanpa pemilik
+
+- **Test C#**: `Regression/R02_SpatialHedgeStateTests.cs` (2, API lama), `Regression/R02_PerpHedgeLifecycleTests.cs` (6),
+  skenario P18. **Test SQL**: blok `REGRESSION v0.3` di `db/tests/test_schema.sql` (trade 1008/1009, di-rollback).
+- **MERAH (perilaku, API lama)**:
+  ```
+  FAIL R02_SpatialHedgeStateTests.Spatial_Repairing_To_PositionOpen_IsAllowed_ForAPerpHedge
+      Assert.Equal() Failure  Expected: None  Actual: StrategyNotAllowed
+  TOTAL: 1 passed, 1 failed
+  ```
+- **MERAH (compile)**, test lifecycle: `error CS1501: No overload for method 'ApplyFill' takes 7 arguments` (TradeGroup lama
+  tidak tahu instrumen sebuah fill → hedge perp tak terlihat), `'TradeGroup' does not contain a definition for
+  'HasOpenPerpPosition'`, `'TransitionError' does not contain a definition for 'OpenDerivativePosition'` / `'NotHedged'`.
+- **MERAH (SQL, tanpa V007)**:
+  ```
+  --- regression v0.3 (di-rollback) ---
+  ERROR:  FAIL  R-02: hedge PERP_HEDGE tidak boleh berakhir REPAIRED  expected error AR002 tapi statement sukses
+  ```
+- **Patch**:
+  - `TradeGroup`: `ApplyFill(instrument, …)` wajib menyebut instrumen; posisi perp dilacak per instrumen (maks. 4,
+    tanpa alokasi); `IsFlat` = delta ≤ dust **dan** tidak ada posisi perp; `IsDeltaNeutral` terpisah;
+    `TransitionTo` menolak COMPLETED/REPAIRED/CLOSED selama perp terbuka (`OpenDerivativePosition`) dan SPATIAL →
+    POSITION_OPEN tanpa hedge (`NotHedged`).
+  - `TradeStateMachine.IsAllowedFor(strategy, from, to)`: SPATIAL boleh POSITION_OPEN hanya dari REPAIRING.
+  - `V007`: trigger: SPATIAL → POSITION_OPEN hanya dari REPAIRING + `PERP_HEDGE`; `PERP_HEDGE` tidak boleh REPAIRED.
+    `v_trade_ledger.open_perp_qty_base` (posisi perp per instrumen), `is_flat` mensyaratkan 0;
+    `v_open_exposure` ikut menampilkannya → StartupRecovery melihat hedge terbuka walau label repair salah.
+  - Helper SQL `expect_error_like` (SQLSTATE **dan** isi pesan): assert pertama sempat lulus karena alasan lain
+    (transisi ilegal di tabel), terdeteksi dan diperbaiki sebelum commit.
+- **HIJAU**:
+  ```
+  R02_PerpHedgeLifecycleTests             6 passed
+  R02_SpatialHedgeStateTests              2 passed
+  full suite: TOTAL: 167 passed, 0 failed
+  PASS  R-02: hedge PERP_HEDGE tidak boleh berakhir REPAIRED → ditolak AR002 (… tidak boleh berakhir REPAIRED …)
+  PASS  R-02: delta 0 tetapi TIDAK flat (perp short terbuka)
+  PASS  R-02: hedge terbuka terlihat di v_open_exposure (StartupRecovery)
+  PASS  R-02: hedge ditutup → realized (fee 4 kaki)  = -1.620025
+  PASS  R-02: setelah CLOSED tidak lagi di v_open_exposure
+  PASS  R-02: SPATIAL IN_FLIGHT → POSITION_OPEN tetap ditolak → ditolak AR002
+  PASS  R-02: SPATIAL REPAIRING → POSITION_OPEN tanpa PERP_HEDGE ditolak → ditolak AR002
+  PASS  R-02: REPAIRED dengan perp terbuka tetap di v_open_exposure
+  ALL TESTS PASSED
+  ```
