@@ -220,3 +220,20 @@ jadi datanya dikumpulkan di CI: job manual `seqlock-arm64` (`df8d55e`) = listing
   tanpa LSE. Bila Jansen tetap ingin fence asuransi, cukup satu baris di `BeginWrite` (`if (!X86Base.IsSupported)
   Interlocked.MemoryBarrier();`).
 - Branch sementara `tmp/r05-v02-evidence` tidak bisa dihapus dari sandbox (proxy menolak delete); aman dihapus manual.
+
+## R-09 (S2) — `NetworkId` 0 (tak terpetakan) menjadi wildcard → route palsu Open
+
+- **Test**: `Regression/R09_UnmappedNetworkTests.cs` (4), skenario P04. Tiga test pertama memakai API lama.
+- **MERAH (perilaku, 3 test API lama)**:
+  ```
+  FAIL …TwoUnmappedNetworks_DoNotFormARoute                       Assert.False() Failure (route Open via network 0)
+  FAIL …UnmappedNetwork_DoesNotCountAsDepositOrWithdrawEnabled    Assert.False() Failure
+  FAIL …UnmappedNetworks_KeepTheWalletTrapFilterOn                Expected: RejectSanity  Actual: Execute (edge 120 bps lolos)
+  TOTAL: 0 passed, 3 failed
+  ```
+- **MERAH (compile, test ke-4)**: `Cannot implicitly convert type 'void' to 'int'` (Update tidak melaporkan network tak
+  terpetakan), `'NetworkId' does not contain a definition for 'IsValid'`.
+- **Patch**: `NetworkId.IsValid` (0 = tak terpetakan); `FindRoute` dan cek deposit/withdraw mengabaikan network tak
+  terpetakan, dan route yang mungkin tersembunyi di baliknya dilaporkan `Unknown` (= tertutup untuk guard), bukan Open;
+  `WalletStatusBook.Update` mengembalikan jumlah network tak terpetakan (adapter → alert).
+- **HIJAU**: `R09_UnmappedNetworkTests 4 passed`; full suite `199 passed, 0 failed`.
