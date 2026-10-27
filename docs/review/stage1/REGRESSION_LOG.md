@@ -290,3 +290,18 @@ jadi datanya dikumpulkan di CI: job manual `seqlock-arm64` (`df8d55e`) = listing
   (fail-closed). Test sanity lama memberi budget eksplisit (snapshot = inventory sekarang → cap sama dengan v0.2 untuk trade pertama).
 - **HIJAU**: `R11_NonReplenishableCapInvariantTests 1 passed`, `R11_RouteBudgetTrackerTests 2 passed` (konsumsi tepat
   0,05 = 25 % dari 0,2 BTC lalu berhenti); full suite `212 passed, 0 failed`.
+
+## R-13 (S3) — repair BUY di spot yang fee-nya dipotong dari base tidak di-gross-up
+
+- **Test**: `Regression/R13_RepairBaseFeeGrossUpTests.cs` (3), skenario P09.
+- **MERAH (compile)**: `error CS0117: 'RepairCandidate' does not contain a definition for 'FeeAsset'`: kode lama tidak bisa
+  diberi tahu di mana fee mendarat. Perilaku lama (P09 Claude-R):
+  ```
+  iter 0: residual -0.01 -> buy 0.010000 BTC, receive 0.009990000
+  iter 1: residual -0.000010000 BTC (=-0.6000 USDT) verdict BelowVenueMinimum
+  ```
+- **Patch**: `RepairCandidate.FeeAsset`; BUY + fee base → `LotNormalizer.GrossUpBuyLots` (diterima ≥ residual, sama seperti
+  kaki entry); SELL + fee base → ukuran dikurangi `/(1+f)`; model biaya per unit residual yang benar-benar diratakan
+  (`vwap/(1−f)` untuk beli); `PlannedQtyCanon` = residual yang diratakan.
+- **HIJAU**: `R13_RepairBaseFeeGrossUpTests 3 passed` (beli 0,010011 → terima 0,010000989 ≥ 0,01, lebih < 1 lot);
+  full suite `215 passed, 0 failed`.

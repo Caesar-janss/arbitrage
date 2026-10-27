@@ -41,6 +41,12 @@ public readonly struct RepairCandidate
     /// <summary>Taker fee rate (fraction) on this venue.</summary>
     public double FeeRate { get; init; }
 
+    /// <summary>
+    /// Where the fee lands (FeeModel.Resolve). Base on a BUY = taken from the received coins → the order is grossed up
+    /// like the entry leg (R-13); Base on a SELL = extra coins leave the wallet → the order is sized down. Default = quote.
+    /// </summary>
+    public FeeAssetKind FeeAsset { get; init; }
+
     /// <summary>False when the venue is halted (e.g. HTTP 429), the book is stale, or inventory is missing.</summary>
     public bool Available { get; init; }
 
@@ -129,6 +135,7 @@ public static class RepairPlanner
 
         double residual = (double)netBaseDelta;
         double absRes = Math.Abs(residual);
+        decimal absResExact = Math.Abs(netBaseDelta);
         if (absRes <= policy.DustCanon)
         {
             return new RepairPlan { Verdict = RepairVerdict.Flat, ResidualCanon = residual, CandidateIndex = -1 };
@@ -155,7 +162,12 @@ public static class RepairPlanner
                 continue;
             }
 
-            long lots = c.Spec.LotsFromCanonical(absRes, Rounding.Down);
+            bool baseFee = c.FeeAsset == FeeAssetKind.Base && c.FeeRate > 0;
+            long lots = !baseFee
+                ? c.Spec.LotsFromCanonical(absRes, Rounding.Down)
+                : side == Side.Buy
+                    ? LotNormalizer.GrossUpBuyLots(absResExact, c.FeeRate, c.Spec)      // receive ≥ residual
+                    : c.Spec.LotsFromCanonical(absRes / (1 + c.FeeRate), Rounding.Down); // sold + fee ≤ residual
             if (lots <= 0)
             {
                 anyBelowMinimum = true;
@@ -175,7 +187,10 @@ public static class RepairPlanner
                 continue;
             }
 
-            double perUnit = side == Side.Sell ? vwap * (1 - c.FeeRate) : vwap * (1 + c.FeeRate);
+            // cost per unit of residual actually flattened: a base fee changes the quantity, not the cash
+            double perUnit = side == Side.Sell
+                ? (baseFee ? vwap / (1 + c.FeeRate) : vwap * (1 - c.FeeRate))
+                : (baseFee ? vwap / (1 - c.FeeRate) : vwap * (1 + c.FeeRate));
             double cost = (side == Side.Sell ? referencePx - perUnit : perUnit - referencePx) / referencePx * 1e4;
             cost += c.ExtraCostBps;
             double fillRatio = (double)fill.FilledLots / lots;
@@ -218,6 +233,11 @@ public static class RepairPlanner
         }
 
         double planned = chosen.Spec.CanonicalQty(bestLots);
+        if (chosen.FeeAsset == FeeAssetKind.Base && chosen.FeeRate > 0)
+        {
+            planned = side == Side.Buy ? planned * (1 - chosen.FeeRate) : planned * (1 + chosen.FeeRate); // residual flattened
+        }
+
         return new RepairPlan
         {
             Verdict = RepairVerdict.Planned,
