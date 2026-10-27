@@ -16,6 +16,9 @@ public enum SanityFlags : ushort
     InventoryCapApplied = 1 << 6,
     SuspectedWalletTrap = 1 << 7,
     MarketTypeMismatch = 1 << 8,
+
+    /// <summary>A cap needs ReferencePx (quote → base) but it is missing / not finite / ≤ 0 (R-12: used to skip the cap).</summary>
+    ReferencePriceInvalid = 1 << 9,
 }
 
 public readonly struct SanityInput
@@ -147,8 +150,20 @@ public static class SanityGuard
             cap = Math.Min(cap, Math.Max(0, x.SellVenueBaseInventory) * limits.NonReplenishableFraction);
         }
 
-        if (!quoteRoute.IsOpen && x.ReferencePx > 0)
+        if (!quoteRoute.IsOpen)
         {
+            if (!(x.ReferencePx > 0) || !double.IsFinite(x.ReferencePx))
+            {
+                return new SanityResult
+                {
+                    Decision = RejectReason.RejectSanity,
+                    Flags = flags | SanityFlags.ReferencePriceInvalid,
+                    QtyCapCanon = 0,
+                    BaseRoute = baseRoute,
+                    QuoteRoute = quoteRoute,
+                };
+            }
+
             cap = Math.Min(cap, Math.Max(0, x.BuyVenueQuoteInventory) * limits.NonReplenishableFraction / x.ReferencePx);
         }
 

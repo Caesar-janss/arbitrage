@@ -257,3 +257,17 @@ jadi datanya dikumpulkan di CI: job manual `seqlock-arm64` (`df8d55e`) = listing
   `NeedsReconcile(slot)`; hasil REST (waktu server venue) masuk lewat `OnBalance` dan menyelesaikannya.
 - **HIJAU**: `R06_SameMillisecondBalanceTests 3 passed`, `R06_UnsettledReservationTests 2 passed`; full suite
   `204 passed, 0 failed` (termasuk zero-alloc InventoryLedger dengan event saldo strictly later).
+
+## R-12 (S3) — route quote tertutup + `ReferencePx` 0/NaN → cap dilewati (fail-open)
+
+- **Test**: `Regression/R12_SanityReferencePriceTests.cs` (5; API lama), skenario P02.
+- **MERAH**:
+  ```
+  FAIL …QuoteRouteClosed_WithoutAUsableReferencePrice_FailsClosed(0)     refPx=0: Execute cap=Infinity
+  FAIL …QuoteRouteClosed_WithoutAUsableReferencePrice_FailsClosed(NaN)   refPx=NaN: Execute cap=Infinity
+  FAIL …QuoteRouteClosed_WithoutAUsableReferencePrice_FailsClosed(-1)    refPx=-1: Execute cap=Infinity
+  TOTAL: 2 passed, 3 failed     (+∞ kebetulan sudah fail-closed: cap = x/∞ = 0)
+  ```
+- **Patch**: `SanityGuard`: bila route quote tidak Open dan `ReferencePx` tidak finite atau ≤ 0 → `RejectSanity` +
+  `SanityFlags.ReferencePriceInvalid`, cap 0.
+- **HIJAU**: `R12_SanityReferencePriceTests 5 passed`; full suite `209 passed, 0 failed`.
