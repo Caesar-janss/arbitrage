@@ -200,7 +200,7 @@ public class ParsingBenchmarks
     [GlobalSetup]
     public void Setup()
     {
-        _ids = new SnowflakeIdGenerator(1, SystemClock.Instance);
+        _ids = new SnowflakeIdGenerator(1, SystemClock.Instance, resumeAfterUnixMs: 0);
         _f = new BenchFixtures();
     }
 

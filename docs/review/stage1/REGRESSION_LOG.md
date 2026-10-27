@@ -336,3 +336,16 @@ jadi datanya dikumpulkan di CI: job manual `seqlock-arm64` (`df8d55e`) = listing
 - **Patch**: `SpatialArbPricer`: residual positif (koin lebih di venue beli) dinilai di **bid venue beli**; residual negatif
   (fee base di kaki jual → kekurangan di venue jual) dinilai di **ask venue jual** (biaya beli kembali).
 - **HIJAU**: `R19_ResidualMarkTests 2 passed` (net 0,38461, bukan 0,42377); full suite `224 passed, 0 failed`.
+
+## R-17 (S3) — restart setelah jam mundur → Snowflake menerbitkan ulang ID yang sama
+
+- **Test**: `Regression/R17_SnowflakeRestartTests.cs` (3), skenario P16.
+- **MERAH (compile)**: `The best overload for 'SnowflakeIdGenerator' does not have a parameter named 'resumeAfterUnixMs'`,
+  `'SnowflakeIdGenerator' does not contain a definition for 'LastIssuedUnixMs'`: kode lama tidak bisa diberi titik
+  lanjut setelah restart. Perilaku lama (P16 Claude-R): `id before restart 41943040020480, first id after restart at same
+  wall ms 41943040020480: duplicate=True`.
+- **Patch**: konstruktor wajib `resumeAfterUnixMs` (0 = node tanpa riwayat): state awal = (ms resume, sequence habis) →
+  ID pertama punya ms > resume walau jam di belakang; `LastIssuedUnixMs` untuk journal host. Doc: host mengambil
+  max(journal, max id node di DB) + margin untuk ID yang terbit tetapi belum tersimpan.
+- **HIJAU**: `R17_SnowflakeRestartTests 3 passed` (5.000 ID sebelum + 5.000 sesudah restart, tanpa duplikat);
+  full suite `227 passed, 0 failed`.

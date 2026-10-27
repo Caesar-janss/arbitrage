@@ -10,7 +10,7 @@ public class SnowflakeIdGeneratorTests
     public void Ids_AreStrictlyIncreasing_AndCarryNodeAndTime()
     {
         var clock = new ManualClock(0, T0);
-        var gen = new SnowflakeIdGenerator(17, clock);
+        var gen = new SnowflakeIdGenerator(17, clock, 0);
         long prev = 0;
         for (int i = 0; i < 10_000; i++)
         {
@@ -27,7 +27,7 @@ public class SnowflakeIdGeneratorTests
     public void ClockStepBack_DoesNotBreakMonotonicity()
     {
         var clock = new ManualClock(0, T0);
-        var gen = new SnowflakeIdGenerator(1, clock);
+        var gen = new SnowflakeIdGenerator(1, clock, 0);
         long a = gen.Next();
         clock.UnixMicros -= 5_000_000; // NTP step back 5 s
         long b = gen.Next();
@@ -37,7 +37,7 @@ public class SnowflakeIdGeneratorTests
     [Fact]
     public void ConcurrentGeneration_ProducesUniqueIds()
     {
-        var gen = new SnowflakeIdGenerator(3, SystemClock.Instance);
+        var gen = new SnowflakeIdGenerator(3, SystemClock.Instance, 0);
         const int Threads = 4;
         const int PerThread = 25_000;
         var all = new long[Threads][];
@@ -66,7 +66,7 @@ public class SnowflakeIdGeneratorTests
     [Fact]
     public void ClientOrderId_RoundTrips_WithinVenueLimits()
     {
-        var gen = new SnowflakeIdGenerator(1023, new ManualClock(0, T0));
+        var gen = new SnowflakeIdGenerator(1023, new ManualClock(0, T0), 0);
         long id = gen.Next();
         Span<byte> buf = stackalloc byte[ClientOrderId.MaxLength];
         Assert.True(ClientOrderId.TryFormat(id, buf, out int n));
@@ -81,6 +81,6 @@ public class SnowflakeIdGeneratorTests
     [Fact]
     public void InvalidNode_Throws()
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => new SnowflakeIdGenerator(1024, SystemClock.Instance));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new SnowflakeIdGenerator(1024, SystemClock.Instance, 0));
     }
 }

@@ -192,7 +192,7 @@ public class ZeroAllocationTests
     [Fact]
     public void Parsing_And_Ids()
     {
-        var gen = new SnowflakeIdGenerator(1, SystemClock.Instance);
+        var gen = new SnowflakeIdGenerator(1, SystemClock.Instance, resumeAfterUnixMs: 0);
         byte[] buffer = new byte[32];
         AssertZeroAlloc("Snowflake+ClientOrderId", () => ClientOrderId.TryFormat(gen.Next(), buffer, out _));
         AssertZeroAlloc("Utf8Decimal+Grid", () =>
