@@ -197,3 +197,26 @@ di sandbox; lihat `STAGE1_CORE.md` §7). CI GitHub menjalankan xUnit asli pada c
   `SpatialArbPricer` → `RejectStale` dan `RepairPlanner` melewati kandidat bila generasi book ≠ generasi spec (fail-closed sampai
   re-snapshot).
 - **HIJAU**: `R08_GridGenerationTests 3 passed`, `R08_SpecGridChangeBehaviourTests 3 passed`; full suite `195 passed, 0 failed`.
+
+## R-05 (S2, NEEDS-DATA → **REJECTED berdasarkan data**) — urutan store writer seqlock di ARM64
+
+Tidak bisa dibuat merah di sandbox (x64). Runner `ubuntu-24.04-arm` kini tersedia untuk repo private
+([changelog GitHub 2026-01-29](https://github.blog/changelog/2026-01-29-arm64-standard-runners-are-now-available-in-private-repositories)),
+jadi datanya dikumpulkan di CI: job manual `seqlock-arm64` (`df8d55e`) = listing JIT full-opt
+(`DOTNET_JitDisasm`) + stress seqlock & R-04 20 kali. Dijalankan dua kali:
+
+| Run | Kode OrderBookL2 | Instruksi atomik writer (anotasi CI) | Barrier | Stress ×20 |
+|---|---|---|---|---|
+| 40470728583 | **v0.2** (identik `7cdf6a4`; branch sementara `tmp/r05-v02-evidence`) | `ApplyDelta`: `ldaddal x3, x1, [x1]`; `ApplySnapshot`: `ldaddal x3, x3, [x21]` (BeginWrite di-inline) | – | 20/20 lulus |
+| 40470466580 | sesudah R-04 (`df8d55e`) | `BeginWrite`: `ldaddal x2, x2, [x1]` (tidak di-inline) | – | 20/20 lulus |
+
+- Hipotesis R-05 = writer di-lower ke `staddl` / `ldaddal …, xzr` (tanpa acquire, karena hasil increment dibuang).
+  **Data: tidak terjadi.** RyuJIT .NET 8 memakai register tujuan nyata (x1/x2/x3), sehingga LDADDAL = acquire + release,
+  yang menurut model memori aarch64 mengurutkan store versi-ganjil sebelum store data berikutnya. Stress di ARM64 lulus 20/20.
+- Sejak R-04, hasil increment **dipakai** (`EndWrite(v)`), sehingga lowering ke XZR tidak mungkin secara struktural.
+  Komentar di `BeginWrite` menandai syarat ini.
+- **Keputusan**: fence defensif `MemoryBarrier()` yang semula direncanakan di FINDINGS_LOG **tidak dipasang**: data
+  menunjukkan fence itu redundan. Job `seqlock-arm64` tetap ada untuk cek ulang saat upgrade runtime (.NET 9/10) atau CPU
+  tanpa LSE. Bila Jansen tetap ingin fence asuransi, cukup satu baris di `BeginWrite` (`if (!X86Base.IsSupported)
+  Interlocked.MemoryBarrier();`).
+- Branch sementara `tmp/r05-v02-evidence` tidak bisa dihapus dari sandbox (proxy menolak delete); aman dihapus manual.

@@ -262,7 +262,14 @@ public sealed class OrderBookL2
         return n;
     }
 
-    /// <summary>Writer thread only. Returns the ODD version of this section.</summary>
+    /// <summary>
+    /// Writer thread only. Returns the ODD version of this section.
+    /// Memory ordering: x64 `lock xadd` is a full fence. ARM64 (R-05, measured on ubuntu-24.04-arm, .NET 8, LSE): RyuJIT
+    /// emits `ldaddal xN, xM, [addr]` with a real destination register = acquire + release RMW, which orders the odd
+    /// version before the following data stores (aarch64.cat: po; [A]; amo; [L]; po). The hazardous lowering would be
+    /// `staddl` / `ldaddal …, xzr` (no acquire) — possible only if the result were unused, and it is used here
+    /// (<see cref="EndWrite"/>). Keep it consumed. Re-check with the CI job `seqlock-arm64` on runtime upgrades.
+    /// </summary>
     private long BeginWrite()
     {
         long v = Interlocked.Increment(ref _version);
