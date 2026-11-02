@@ -12,13 +12,13 @@ ditriase, (3) fix S1 (R-01, R-02) di-review ulang oleh ChatGPT pada paket v0.3, 
 Patch v0.3 tidak mengubah status ini. (Syarat (3) semula "review Gemini". Gemini keluar dari tim 2026-10-27, lihat
 `TEAM_WORKFLOW.md` §9.)
 
-Progres syarat penutupan (2026-11-02, setelah review ChatGPT 5732047500 @ `4bf87f7`):
-(1) **terpenuhi**: semua S1/S2 CONFIRMED (R-xx dan C-xx) punya fix + regression merah→hijau; (2) **terpenuhi**: C-01/C-02
-ditriase (CONFIRMED, di-fix); (3) **terpenuhi untuk R-01 dan R-02 dalam lingkup Core**: ChatGPT menerima fix reproduksi
-asli dengan catatan (test integrasi sebelum live; lifecycle partial exit = C-08, kini di-fix). **Baru**: C-07 adalah S1,
-jadi fix C-07 juga wajib di-review ulang ChatGPT (`TEAM_WORKFLOW.md` §2/§3); (4) **belum**: persetujuan Jansen.
-Versi untuk re-review: head `stage1/review-r1` (ronde 2), `make_review_packet.py --version` = `c294c9a0669c`
-(v0.3 = `9be7565c2c7f`).
+Progres syarat penutupan (2026-11-02, setelah re-review ChatGPT 5732656006 @ `30417db`):
+(1) **terpenuhi**: semua S1/S2 CONFIRMED (R-xx, C-01…C-10) punya fix + regression merah→hijau; (2) **terpenuhi**:
+C-01/C-02 ditriase dan di-fix; (3) re-review ChatGPT atas fix S1: R-01, R-02 diterima dalam lingkup Core (ronde 2);
+reproduksi asli C-07 tertutup; C-08/C-02/C-01 diterima (ronde 3). **Belum**: fix C-09 dan C-10 (keduanya S1, ronde 3)
+belum di-review ulang; (4) **belum**: persetujuan Jansen.
+Versi untuk re-review: head `stage1/review-r1` (ronde 3), `make_review_packet.py --version` = `3683d7eeb281`
+(ronde 2 = `c294c9a0669c`, v0.3 = `9be7565c2c7f`).
 
 Detail tiap temuan Claude-R: `docs/review/stage1/R_claude-r.md`. ChatGPT: lihat bagian di bawah. Gemini: keluar dari tim
 (2026-10-27), tidak ada review.
@@ -54,7 +54,7 @@ Bukti merah/hijau tiap baris: `docs/review/stage1/REGRESSION_LOG.md`. Semua fix 
 - **C**: inventory & gate.
 - **D**: kontrak DB/analytics & test.
 
-### ChatGPT — Tahap 1 ronde 1 (review PR #2 `5732047500` @ `4bf87f7`)
+### ChatGPT — Tahap 1 ronde 1–3 (review PR #2 `5732047500` @ `4bf87f7`, re-review `5732656006` @ `30417db`)
 
 Isi lengkap C-01…C-08 diterima sebagai review PR (format template). Klaim C-03…C-06 sudah dibandingkan dengan R-xx: sama
 substansi, jadi tetap DUPLICATE (reviewer juga menyatakan reproduksi aslinya tertutup di `4bf87f7`). Duplikat **tidak
@@ -67,6 +67,8 @@ merah pada kode pra-patch; reviewer sendiri tidak bisa menjalankan dotnet (bukti
 | C-08 | S2 | State machine C# + SQL | hedge spatial tidak bisa kembali POSITION_OPEN setelah partial exit | CONFIRMED | `StrategyNotAllowed` (C#), `AR002 … dari EXITING` (DB) | `01aa61f` |
 | C-02 | S2 | SpatialArbPricer | gross-up fee-base setelah Q* melewati MaxBuyNotional (600,66 > 600) | CONFIRMED | angka reviewer tereproduksi persis; juga cap qty, level, kedalaman haircut | `397d9c7 + e116091` |
 | C-01 | S2 | FixedPoint.ToUnits | epsilon relatif menyeberangi integer (1e12 → 1e12 ± 1) | CONFIRMED | reviewer persis + integer exact 1e12…1e18 + properti 200.000 nilai | `122309d + 179be1b` |
+| C-09 | S1 | InventoryLedger | stamp batas bawah snapshot (kontrak host C-07) → event stream lama menimpa snapshot → Available 20→100 | CONFIRMED | urutan reviewer persis (100) + model berinterval merah; ditambah varian as-of exact yang ditemukan builder (duplikat tanpa urutan, 26→31) | `492852a` |
+| C-10 | S1 | TradeGroup (semua strategi) | perp ada ≠ hedge seimbang; holding tidak seimbang masuk `POSITION_OPEN` | CONFIRMED (asal: observasi builder ronde 2) | 5 skenario merah (buy-back saja, ukuran beda, hedge repair parsial, fee base, entry funding) | `7fc631d` |
 | C-03 | S1 | InventoryLedger | → R-06 | DUPLICATE of R-06 | isi dibandingkan; reproduksi asli tertutup | (via R-06) |
 | C-04 | S2 | SpatialArbPricer | → R-03 | DUPLICATE of R-03 | isi dibandingkan; reproduksi asli tertutup | (via R-03) |
 | C-05 | S2 | RepairPlanner | → R-13 | DUPLICATE of R-13 | isi dibandingkan; reproduksi asli tertutup | (via R-13) |
@@ -77,9 +79,13 @@ Re-review S1 oleh ChatGPT: **R-01** diterima di level Core (sebelum live: test i
 diterima untuk reproduksi inti; lifecycle lengkap menunggu C-08 (kini di-fix); guard SQL menjaga label `PERP_HEDGE`,
 bukan seluruh invariant eksposur C#, jadi keduanya tidak disebut identik.
 
-**Observasi builder, diajukan ke reviewer (belum temuan):** aturan spatial `POSITION_OPEN` memeriksa hedge **ada**, bukan
-rasio hedge seimbang; partial unwind yang tidak seimbang bisa kembali `POSITION_OPEN` dengan delta ≠ 0. Usulan: host
-memakai `IsDeltaNeutral(lot perp)` sebelum `TransitionTo(PositionOpen)`, selain itu `RESIDUAL`.
+Re-review ronde 3: **C-07** reproduksi asli tertutup, penerimaan kontrak penuh tertahan C-09. **C-08** diterima untuk partial
+exit seimbang. **C-02** diterima untuk cap final setelah gross-up (cap notional sebelum fee quote, bukan jaminan total dana
+IOC). **C-01** diterima untuk epsilon yang menyeberangi integer besar.
+
+~~Observasi builder ronde 2: usulan host memakai `IsDeltaNeutral(lot perp)`~~ → dinaikkan reviewer menjadi **C-10 (S1)**.
+Usulan "satu lot perp" ditolak reviewer dengan benar (lot BTC 0,001 ≈ 60 USDT). Fix memakai budget risiko dalam quote dan
+ditegakkan di `TradeGroup`, bukan panggilan host opsional.
 
 ### Koreksi atas klaim Claude sendiri (dari ronde ini)
 - `STAGE1_CORE` §3.9 "available tidak pernah overstated": **salah** (R-06).
@@ -99,20 +105,32 @@ memakai `IsDeltaNeutral(lot perp)` sebelum `TransitionTo(PositionOpen)`, selain 
   `ALL TESTS PASSED`).
 - Pricer v0.3 tidak memeriksa cap pada kaki final setelah gross-up (C-02), walau R-03 sudah menyatukan haircut; R-03 hanya
   memeriksa konsistensi haircut, bukan cap.
+- Ronde 2: kontrak host C-07 "bila tidak ada as-of, stamp batas bawah; lebih awal = lebih aman" **salah** (C-09). Batas
+  bawah membuat snapshot kalah dari event yang lebih lama. Klaim "jaminan di bawah kontrak host" di atas berlaku untuk
+  kontrak yang dikoreksi (interval as-of), bukan untuk kontrak ronde 2.
+- Fix C-07 (`98901fb`) sendiri berlubang untuk snapshot as-of exact: duplikat tanpa urutan tidak mengakhiri urutan dalam
+  1 ms. Model C-07 "1.500 riwayat lulus" lulus karena kebetulan urutan acak, bukan bukti; lubang terlihat begitu urutan
+  acaknya bergeser (seed 56). Model sekarang 5.000 riwayat exact + 2 × 3.000 berinterval, dengan coverage guard.
+- Ronde 2 mengusulkan toleransi "satu lot perp" untuk C-10: tidak aman (≈ 60 USDT di BTC); diganti budget risiko.
+- Pesan commit `397d9c7` menulis "7 green" untuk C-02: jumlahnya 6.
 
 ### Statistik reviewer
 | Reviewer | Dilaporkan | Unik (baru) | DUPLICATE | CONFIRMED | REJECTED | NEEDS-DATA | Menunggu triase | Precision (unik yang terputus) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | Claude-R | 20 | 20 | 0 | 19 | 1 (R-05, data ARM64) | 0 | 0 | 95% (19/20) |
-| ChatGPT | 8 | 4 | 4 | 4 (C-07 S1; C-01, C-02, C-08 S2) | 0 | 0 | 0 | 100% (4/4) |
+| ChatGPT | 10 | 6 (1 dari observasi builder: C-10) | 4 | 6 (C-07, C-09, C-10 S1; C-01, C-02, C-08 S2) | 0 | 0 | 0 | 100% (6/6) |
 | Gemini | — | | | | | | | keluar dari tim 2026-10-27, tidak menyerahkan review |
 
 Aturan hitung: "Unik" = tidak tumpang-tindih dengan temuan yang tercatat lebih dulu. DUPLICATE tidak menambah skor
-temuan, tetapi koreksi label (R-01) dicatat di atas sebagai kontribusi review.
+temuan, tetapi koreksi label (R-01) dicatat di atas sebagai kontribusi review. C-10 dihitung CONFIRMED untuk ChatGPT,
+tetapi bukan unique catch-nya: reviewer sendiri menyebutnya konfirmasi observasi builder (kontribusinya: reproduksi konkret,
+severity S1, dan menolak usulan "satu lot perp").
 
-Metrik §8 `TEAM_WORKFLOW.md` (ronde 1): severity yield S1+S2 terkonfirmasi: Claude-R 9 (R-01, R-02, R-03, R-04, R-06,
-R-07, R-08, R-09, R-10), ChatGPT 4. Unique catch: ChatGPT 4 (keempatnya **tidak** ditemukan Claude-R maupun builder).
-Escaped bugs: C-07, C-08, C-01, C-02 lolos dari Claude-R dan dari builder. C-01, C-02 dan guard C-07 sudah ada di v0.2
-(fix R-06 menyentuh fungsi yang sama tetapi tidak menangkap overwrite ms sama); C-08 ada di kode yang baru ditulis untuk
-fix R-02/R-10. Pelajaran: fix S1/S2 butuh reviewer kedua yang membaca patch-nya dan fungsi di sekitarnya, bukan hanya
-reproduksi asli.
+Metrik §8 `TEAM_WORKFLOW.md` (Tahap 1, ronde 1–3): severity yield S1+S2 terkonfirmasi: Claude-R 9 (R-01, R-02, R-03, R-04,
+R-06, R-07, R-08, R-09, R-10), ChatGPT 6. Unique catch: ChatGPT 5 (C-01, C-02, C-07, C-08, C-09); keempat yang pertama
+**tidak** ditemukan Claude-R maupun builder. Escaped bugs: C-07, C-08, C-01, C-02 lolos dari Claude-R dan dari builder.
+C-01, C-02 dan guard C-07 sudah ada di v0.2 (fix R-06 menyentuh fungsi yang sama tetapi tidak menangkap overwrite ms sama);
+C-08 ada di kode yang baru ditulis untuk fix R-02/R-10. **C-09 lahir dari fix C-07 itu sendiri** (kontrak host yang salah
+plus lubang duplikat). Pelajaran: (a) fix S1/S2 butuh reviewer kedua yang membaca patch-nya dan fungsi di sekitarnya, bukan
+hanya reproduksi asli; (b) model acak yang lulus bukan bukti tanpa coverage guard untuk pola yang diklaim tertutup; (c)
+kontrak host yang "konservatif" perlu dibuktikan di model, bukan dengan argumen.

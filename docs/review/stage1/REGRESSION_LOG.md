@@ -725,3 +725,15 @@ holding delta-netral, tetapi `TradeGroup` hanya mengecek bahwa perp **ada** (spa
 - **Keputusan untuk Jansen**: nilai `MaxHoldingDeltaQuote` (default 1 USDT). Lebih besar = lebih sedikit repair tambahan
   setelah hedge yang dibulatkan ke lot perp; lebih kecil = eksposur telanjang lebih kecil saat holding.
 
+## Ringkasan ronde 3 (re-review ChatGPT)
+
+| | Jumlah |
+|---|---|
+| Temuan | C-09 (S1, + varian as-of exact temuan builder), C-10 (S1, asal observasi builder); keduanya CONFIRMED dan di-fix |
+| Merah dicatat sebelum patch | C-09: perilaku (scratch, kontrak lama) + perilaku API lama (duplikat) + compile; C-10: perilaku API lama + compile |
+| Test C# | 291 → **317** (harness offline 317/317) |
+| DB | tidak berubah: `ALL TESTS PASSED`, 124 assertion |
+| Mutation | C-09 11 dijalankan (8 tertangkap di desain akhir; 3 lolos di versi pertama → 1 mengubah desain jadi lebih sederhana dan lebih live, 1 hilang bersama state yang dihapus, 1 dikunci test presisi); C-10 6/6 |
+| Benchmark | 0 B/op semua; `InventoryLedger` 481,6 → 453,6 ns/op, pricer dan state machine dalam noise (A/B bergantian 4× vs `30417db`) |
+| Belum | re-review ChatGPT untuk fix C-09 dan C-10 (S1), persetujuan Jansen → **Tahap 1 tetap REVIEW TERBUKA** |
+
