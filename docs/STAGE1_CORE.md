@@ -344,7 +344,8 @@ wire→decision (< 50 µs) aman dengan margin dua orde. Hot path tetap jauh lebi
    - (a) spatial utama Binance↔Bitget, Bybit untuk funding arb (tidak sensitif latency) & venue hedge;
    - (b) tetap Bitget↔Bybit dan terima buffer slippage lebih besar (otomatis via §3.7, artinya lebih sedikit trade);
    - (c) dua proses di dua region (kompleks, butuh koordinasi state lintas region).
-   Kode Tahap 1 venue-agnostic; yang berubah hanya urutan adapter di Tahap 2.
+   Kode Tahap 1 venue-agnostic; yang berubah hanya urutan adapter di Tahap 2. Angka di atas adalah asumsi; diukur
+   dengan `tools/latency_probe.py` (S0, `docs/S0_LATENCY_PROBE.md`).
 2. **Bitget WS order entry.** WS `place-order` terdokumentasi di bagian **UTA**. Pihak ketiga mencatat stream
    WS Bitget (API classic) tidak menerima order. Pastikan akun dalam mode UTA sebelum mendesain gateway Bitget.
    Bybit V5 juga punya WS order entry, jadi ini bukan pembeda antar venue.
