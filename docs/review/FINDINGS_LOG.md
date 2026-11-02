@@ -21,6 +21,8 @@ clone bersih; tiga temuan recheck (B-01…B-03, di bawah) di-fix sebelum penutup
 `STAGE1_CORE.md` §6.1 (I-1…I-11) sebagai kewajiban Tahap 2+, bukan temuan terbuka.
 Versi yang di-review terakhir: `a029256`, `make_review_packet.py --version` = `3683d7eeb281`. Commit sesudahnya hanya
 dokumentasi (§6.1 dan log ini; `src/`, `tests/`, `db/` identik dengan `a029256`), hash `b02b0fd9762e`.
+**Versi penutupan Tahap 1:** `b603c5f` (= `a029256` + fix recheck B-01/B-02 + docs), `make_review_packet.py --version` =
+`e93e1b75de80`.
 
 Detail tiap temuan Claude-R: `docs/review/stage1/R_claude-r.md`. ChatGPT: lihat bagian di bawah. Gemini: keluar dari tim
 (2026-10-27), tidak ada review.
