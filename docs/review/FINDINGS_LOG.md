@@ -12,13 +12,14 @@ ditriase, (3) fix S1 (R-01, R-02) di-review ulang oleh ChatGPT pada paket v0.3, 
 Patch v0.3 tidak mengubah status ini. (Syarat (3) semula "review Gemini". Gemini keluar dari tim 2026-10-27, lihat
 `TEAM_WORKFLOW.md` §9.)
 
-Progres syarat penutupan (2026-11-02, setelah re-review ChatGPT 5732656006 @ `30417db`):
+Progres syarat penutupan (2026-11-02, setelah re-review ChatGPT 5732867198 @ `a029256`):
 (1) **terpenuhi**: semua S1/S2 CONFIRMED (R-xx, C-01…C-10) punya fix + regression merah→hijau; (2) **terpenuhi**:
-C-01/C-02 ditriase dan di-fix; (3) re-review ChatGPT atas fix S1: R-01, R-02 diterima dalam lingkup Core (ronde 2);
-reproduksi asli C-07 tertutup; C-08/C-02/C-01 diterima (ronde 3). **Belum**: fix C-09 dan C-10 (keduanya S1, ronde 3)
-belum di-review ulang; (4) **belum**: persetujuan Jansen.
-Versi untuk re-review: head `stage1/review-r1` (ronde 3), `make_review_packet.py --version` = `3683d7eeb281`
-(ronde 2 = `c294c9a0669c`, v0.3 = `9be7565c2c7f`).
+C-01/C-02 ditriase dan di-fix; (3) **terpenuhi**: re-review ChatGPT atas semua fix S1. R-01, R-02 diterima dalam lingkup
+Core (ronde 2); C-07 reproduksi asli, C-08/C-02/C-01 (ronde 3); C-09 termasuk varian duplikat builder, dan C-10 (ronde 4),
+tanpa blocker baru; (4) **belum**: persetujuan eksplisit Jansen. Batas integrasi dari reviewer dipindah ke
+`STAGE1_CORE.md` §6.1 (I-1…I-11) sebagai kewajiban Tahap 2+, bukan temuan terbuka.
+Versi yang di-review terakhir: `a029256`, `make_review_packet.py --version` = `3683d7eeb281`. Commit sesudahnya hanya
+dokumentasi (§6.1 dan log ini; `src/`, `tests/`, `db/` identik dengan `a029256`), hash `b02b0fd9762e`.
 
 Detail tiap temuan Claude-R: `docs/review/stage1/R_claude-r.md`. ChatGPT: lihat bagian di bawah. Gemini: keluar dari tim
 (2026-10-27), tidak ada review.
@@ -54,7 +55,7 @@ Bukti merah/hijau tiap baris: `docs/review/stage1/REGRESSION_LOG.md`. Semua fix 
 - **C**: inventory & gate.
 - **D**: kontrak DB/analytics & test.
 
-### ChatGPT — Tahap 1 ronde 1–3 (review PR #2 `5732047500` @ `4bf87f7`, re-review `5732656006` @ `30417db`)
+### ChatGPT — Tahap 1 ronde 1–4 (review PR #2 `5732047500` @ `4bf87f7`, re-review `5732656006` @ `30417db`, `5732867198` @ `a029256`)
 
 Isi lengkap C-01…C-08 diterima sebagai review PR (format template). Klaim C-03…C-06 sudah dibandingkan dengan R-xx: sama
 substansi, jadi tetap DUPLICATE (reviewer juga menyatakan reproduksi aslinya tertutup di `4bf87f7`). Duplikat **tidak
@@ -67,8 +68,8 @@ merah pada kode pra-patch; reviewer sendiri tidak bisa menjalankan dotnet (bukti
 | C-08 | S2 | State machine C# + SQL | hedge spatial tidak bisa kembali POSITION_OPEN setelah partial exit | CONFIRMED | `StrategyNotAllowed` (C#), `AR002 … dari EXITING` (DB) | `01aa61f` |
 | C-02 | S2 | SpatialArbPricer | gross-up fee-base setelah Q* melewati MaxBuyNotional (600,66 > 600) | CONFIRMED | angka reviewer tereproduksi persis; juga cap qty, level, kedalaman haircut | `397d9c7 + e116091` |
 | C-01 | S2 | FixedPoint.ToUnits | epsilon relatif menyeberangi integer (1e12 → 1e12 ± 1) | CONFIRMED | reviewer persis + integer exact 1e12…1e18 + properti 200.000 nilai | `122309d + 179be1b` |
-| C-09 | S1 | InventoryLedger | stamp batas bawah snapshot (kontrak host C-07) → event stream lama menimpa snapshot → Available 20→100 | CONFIRMED | urutan reviewer persis (100) + model berinterval merah; ditambah varian as-of exact yang ditemukan builder (duplikat tanpa urutan, 26→31) | `492852a` |
-| C-10 | S1 | TradeGroup (semua strategi) | perp ada ≠ hedge seimbang; holding tidak seimbang masuk `POSITION_OPEN` | CONFIRMED (asal: observasi builder ronde 2) | 5 skenario merah (buy-back saja, ukuran beda, hedge repair parsial, fee base, entry funding) | `7fc631d` |
+| C-09 | S1 | InventoryLedger | stamp batas bawah snapshot (kontrak host C-07) → event stream lama menimpa snapshot → Available 20→100 | CONFIRMED → **FIXED, re-review ✅** (`5732867198`) | urutan reviewer persis (100) + model berinterval merah; ditambah varian as-of exact yang ditemukan builder (duplikat tanpa urutan, 26→31) | `492852a` |
+| C-10 | S1 | TradeGroup (semua strategi) | perp ada ≠ hedge seimbang; holding tidak seimbang masuk `POSITION_OPEN` | CONFIRMED (asal: observasi builder ronde 2) → **FIXED, re-review ✅** (`5732867198`) | 5 skenario merah (buy-back saja, ukuran beda, hedge repair parsial, fee base, entry funding) | `7fc631d` |
 | C-03 | S1 | InventoryLedger | → R-06 | DUPLICATE of R-06 | isi dibandingkan; reproduksi asli tertutup | (via R-06) |
 | C-04 | S2 | SpatialArbPricer | → R-03 | DUPLICATE of R-03 | isi dibandingkan; reproduksi asli tertutup | (via R-03) |
 | C-05 | S2 | RepairPlanner | → R-13 | DUPLICATE of R-13 | isi dibandingkan; reproduksi asli tertutup | (via R-13) |
@@ -82,6 +83,13 @@ bukan seluruh invariant eksposur C#, jadi keduanya tidak disebut identik.
 Re-review ronde 3: **C-07** reproduksi asli tertutup, penerimaan kontrak penuh tertahan C-09. **C-08** diterima untuk partial
 exit seimbang. **C-02** diterima untuk cap final setelah gross-up (cap notional sebelum fee quote, bukan jaminan total dana
 IOC). **C-01** diterima untuk epsilon yang menyeberangi integer besar.
+
+Re-review ronde 4 (`5732867198`): **C-09** diterima, termasuk varian duplikat builder. Reviewer menjalankan model Python
+terbatas (76.572 kombinasi 3 observasi, 229.716 cek `free ≤ nilai observasi kausal terbaru`, lulus; tanpa reservasi /
+clock rollback, bukan bukti formal), dan menyatakan rilis `MarkTerminal` via batas bawah terbesar valid juga saat konflik.
+**C-10** diterima: guard berlaku untuk semua strategi, state/version tidak maju saat ditolak, dan `Initialize` ulang
+mereset toleransi. Tidak ada blocker baru. Tiga risiko integrasi (bounds as-of adapter, makna toleransi terhadap
+perubahan harga, recovery) → `STAGE1_CORE.md` §6.1.
 
 ~~Observasi builder ronde 2: usulan host memakai `IsDeltaNeutral(lot perp)`~~ → dinaikkan reviewer menjadi **C-10 (S1)**.
 Usulan "satu lot perp" ditolak reviewer dengan benar (lot BTC 0,001 ≈ 60 USDT). Fix memakai budget risiko dalam quote dan

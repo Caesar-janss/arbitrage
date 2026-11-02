@@ -357,3 +357,22 @@ wire→decision (< 50 µs) aman dengan margin dua orde. Hot path tetap jauh lebi
 - `ClockOffsetEstimator` (Venues.Common) menghasilkan `VenueClock` untuk `StaleDataGuard`.
 - Synchronizer snapshot/delta memanggil `MarkInvalid(SequenceGap)` → `ApplySnapshot(…, spec.GridGeneration)` (Bitget: CRC32 via `CopyTopFromWriterThread`). `MarkInvalid` boleh dari thread mana pun (R-04).
 - `InventoryLedger.OnBalance` butuh event time venue (Binance `u`, Bybit `creationTime`, Bitget `ts`).
+
+### 6.1 Kewajiban integrasi dari review Tahap 1 (wajib dibuktikan sebelum live)
+Dikumpulkan dari catatan reviewer ronde 1–3 (ChatGPT `5732047500`, `5732656006`, `5732867198`). Bukan bug Core yang
+terbuka; ini batas yang tidak bisa dibuktikan oleh test Core dan harus punya test integrasi / replay di tahap yang disebut.
+
+| # | Asal | Kewajiban | Tahap | Bukti yang diminta |
+|---|---|---|---|---|
+| I-1 | C-09 | bounds snapshot `[notBefore, notAfter]` benar-benar mengurung as-of: lag cache **maksimum** (bukan rata-rata), ketidakpastian jam, resolusi timestamp venue | 2 | pengukuran per venue + replay; bila bounds tidak diketahui → saldo itu **tidak** dipakai untuk entry |
+| I-2 | C-07/C-09 | urutan stream saldo venue benar-benar kausal; counter terima lokal hanya membuktikan urutan terima satu koneksi | 2 | rekaman WS asli + replay; satu sumber berurut per slot |
+| I-3 | C-09 | API titik `OnBalance(slot, free, ms)` hanya untuk as-of exact; batas bawah lewat API titik = salah pakai yang tidak terdeteksi Core | 2 | review kode adapter + test adapter |
+| I-4 | C-10 | executor selalu lewat `TradeGroup.TransitionTo` (bukan tabel state machine saja); `UnhedgedDelta` → repair/residual | 3 | test executor end-to-end |
+| I-5 | C-10 | toleransi holding per trade dipulihkan identik setelah restart (kini belum ada kolom DB-nya) | 3–4 | kolom persistence + test recovery |
+| I-6 | C-10 | guard holding hanya saat transisi: late fill, ADL, likuidasi, dan perubahan harga saat holding perlu monitor kontinu (budget quote dihitung pada `referencePx` saat entry) | 3–4 | monitor + chaos test |
+| I-7 | C-10 | dust yang diterima punya budget sendiri, terpisah dari toleransi holding | 3 | config + alert |
+| I-8 | R-01 | semua posisi cross masuk `EvaluateAccount`; collateral lokal dari luar equity yang sudah dihitung; fill aktual kedua kaki divalidasi ulang | 3 | test integrasi margin |
+| I-9 | R-02 / C-10 | recovery memuat gross exposure perp + order/fill rekonsiliasi, bukan hanya net delta / status terminal | 4 | test recovery testnet |
+| I-10 | C-02 | cap notional = sebelum fee quote; dana IOC total (termasuk fee) dicek terpisah oleh gate inventory | 3 | test executor |
+| I-11 | R-05 | job `seqlock-arm64` dijalankan ulang saat upgrade runtime .NET | 7 | log CI |
+
