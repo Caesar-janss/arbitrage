@@ -30,6 +30,7 @@
 | R-20 | kontrak semua enum ↔ SQL, brute force Q* dengan hurdle/cap/haircut, komentar SQL dibuang | – |
 | C-07 | dua observasi saldo di ms yang sama tanpa urutan → `Conflict`: simpan nilai **terkecil** + `NeedsReconcile`; stream user dengan nomor urut kirim diurutkan dalam 1 ms | stream: `OnBalance(slot, free, ms, seq)` (seq naik per slot, 1 sumber per slot); REST: stamp = waktu *as-of* venue atau batas bawahnya, **jangan** waktu terima lokal / waktu baru untuk data cache |
 | C-08 | hedge spatial yang di-unwind **sebagian** di kedua kaki kembali `EXITING → POSITION_OPEN` (C# + `V008`); entry `IN_FLIGHT → POSITION_OPEN` tetap ditolak | partial unwind: isi kedua kaki dulu, lalu `TransitionTo(PositionOpen)`; bila perp sudah habis tetapi spot tersisa → `RESIDUAL` (`NotHedged`) |
+| C-02 | kaki final (setelah gross-up fee-base & pembulatan lot) dicek ulang terhadap **semua** cap secara exact (notional, qty kedua kaki, level, kedalaman haircut); bila melanggar → ukuran common terbesar yang muat (binary search), atau reject | – |
 
 Pure domain library: **zero dependency eksternal, tanpa I/O, deterministik**. Semua kalkulasi & state
 yang menentukan "masuk / tidak / bagaimana memperbaiki" ada di sini dan diuji tanpa API key.

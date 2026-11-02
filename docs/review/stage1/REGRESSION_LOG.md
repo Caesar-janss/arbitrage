@@ -544,3 +544,36 @@ R-06/R-03/R-13/R-01 (reviewer mengonfirmasi reproduksi aslinya kini tertutup). U
   venue; usulan: host memakai `IsDeltaNeutral(perpLot)` sebelum `TransitionTo(PositionOpen)`, selain itu `RESIDUAL`. Diajukan
   ke reviewer untuk triase, belum diubah di Core.
 
+## C-02 (S2) — gross-up fee-base setelah optimizer melewati MaxBuyNotional (dan cap lain)
+
+- **Test**: `Regression/C02_GrossUpCapRecheckTests.cs` (7, API lama): kasus reviewer persis (Bitget → Bybit, lot 1e-6,
+  cap 600, fee beli 0,1 % base); cap notional saja; cap qty saja; gross-up melewati `MaxLevelsPerSide`; gross-up melewati
+  kedalaman haircut; properti 4.000 book acak (setiap Execute memenuhi semua cap pada kaki final **dan** ukurannya maksimal,
+  oracle = scan linear turun dari floor optimizer, terpisah dari binary search implementasi; coverage guard ≥ 1.000 execute
+  dan ≥ 100 kasus cap mengikat setelah gross-up).
+- **MERAH (perilaku, API lama)**:
+  ```
+  FAIL …ReviewerCase_FinalBuyNotional_StaysWithinTheCap         buy notional 600.66000000 > 600
+  FAIL …NotionalCapAlone_AppliesToTheGrossedUpBuyLeg            buy notional 600.66000000 > 600
+  FAIL …QtyCapAlone_AppliesToTheGrossedUpBuyLeg                 Assert.True() Failure   (beli 0.010011 > 0.01)
+  FAIL …GrossUp_DoesNotWalkPastTheLevelCap                      Expected: 1  Actual: 2
+  FAIL …GrossUp_BeyondHaircutDepth_ShrinksInsteadOfRejecting    Expected: Execute  Actual: RejectThreshold
+  FAIL …RandomBooks_EveryExecuteRespectsTheCaps_AndIsMaximal
+       iter 3 maxQty Infinity maxNotional 1000 haircut 661854 levels 4: Execute breaks a cap (buy 16683 lots, notional 1001.01336600, levels 2/2)
+  TOTAL: 0 passed, 6 failed
+  ```
+  Angka reviewer (600,66) tereproduksi persis. Test cap-notional-saja ditambahkan setelah mutation check (lihat bawah) dan
+  merah juga pada kode pra-patch.
+- **Patch** (`SpatialArbPricer`): kaki final di-size oleh `TrySize` (gross-up, walk hanya `MaxLevelsPerSide` level pertama
+  dengan haircut yang sama, lalu cap qty kedua kaki dan notional beli dibandingkan **exact** dalam decimal; cap double
+  dikonversi ke bentuk desimal terpendeknya, 600 → 600). Bila ukuran pertama melanggar, binary search ukuran common terbesar
+  yang muat (semua cap monoton terhadap ukuran); 0 → `RejectThreshold`. Invariant terdokumentasi di class:
+  `IsExecutable ⇒ notional beli ≤ MaxBuyNotional, kedua kaki ≤ MaxQtyCanon, level ≤ MaxLevelsPerSide, walk lengkap`.
+  Kasus reviewer kini: deliver 0.00999, beli 0.01 (10.000 lot) seharga tepat 600.
+- **HIJAU**: `C02_GrossUpCapRecheckTests 7 passed`; full suite `275 passed, 0 failed` (zero-alloc pricer tetap 0 B).
+- **Mutation** (5, semua tertangkap): hapus cek notional (2 test: cap-notional-saja dan properti; **versi pertama hanya
+  properti yang menangkap**, karena di kasus reviewer cap qty juga mengikat → test cap-notional-saja ditambahkan); walk tanpa
+  batas level (2); hasil search tidak maksimal (2); cap qty hanya di kaki jual (2); reject alih-alih mengecil (6).
+- **Benchmark** (harness offline, A/B berurutan, min dari 2 run): `SpatialArbPricer.Evaluate` 465,7 → 449,0 ns/op (dalam
+  noise), 0 B/op. Jalur umum tetap satu kali sizing; binary search hanya saat cap terlanggar.
+

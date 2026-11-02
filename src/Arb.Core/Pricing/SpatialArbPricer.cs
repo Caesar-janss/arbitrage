@@ -117,8 +117,11 @@ public readonly struct SpatialQuote
 /// <summary>
 /// Spatial opportunity pricing pipeline (pure, allocation-free):
 ///  1) usable books → 2) Q* merge-walk with haircut/caps/hurdle → 3) snap to common lot (floor),
-///  gross-up buy leg if its fee is charged in base → 4) exact integer VWAP walks WITH THE SAME HAIRCUT + marginal limit prices →
-///  5) venue minimums → 6) exact net edge vs MinProfit.
+///  gross-up buy leg if its fee is charged in base → 4) exact integer VWAP walks WITH THE SAME HAIRCUT, within
+///  MaxLevelsPerSide, + marginal limit prices → 4b) final legs vs exact caps; if one breaks, the largest common size that
+///  fits (C-02) → 5) venue minimums → 6) exact net edge vs MinProfit.
+/// Invariant: IsExecutable ⇒ final buy notional ≤ MaxBuyNotional, both legs ≤ MaxQtyCanon, levels ≤ MaxLevelsPerSide,
+/// both walks complete on haircut depth (exact decimal / integer comparisons).
 /// Staleness, sanity (wallet status), inventory and halts are separate gates (Risk/*), applied by the engine.
 /// </summary>
 public static class SpatialArbPricer
@@ -166,22 +169,48 @@ public static class SpatialArbPricer
             return Unpriced(RejectReason.RejectMinNotional, cross, askTob, bidTob, tobBps);
         }
 
-        long sellLots = units * ctx.Grid.LotsPerUnitB;
-        decimal sellQtyExact = sell.CanonicalQtyExact(sellLots);
-        long buyLots = p.BuyFee.Asset == FeeAssetKind.Base
-            ? LotNormalizer.GrossUpBuyLots(sellQtyExact, p.BuyFee.Rate, buy)
-            : units * ctx.Grid.LotsPerUnitA;
-
-        // Same liquidity assumption as Q* (R-03): walk only HaircutPpm of each displayed level. The marginal level of
-        // this walk is the IOC limit, so the IOC can sweep FULL displayed size up to it and still fill the whole leg
-        // when only the haircut fraction is really there; VWAP / edge are priced at that (conservative) depth.
-        VwapFill buyFill = VwapWalker.WalkLots(asks, buyLots, p.HaircutPpm);
-        VwapFill sellFill = VwapWalker.WalkLots(bids, sellLots, p.HaircutPpm);
-        if (!buyFill.IsComplete || !sellFill.IsComplete)
+        // Final legs are checked against EVERY cap again (C-02): the base-fee gross-up of the buy leg and lot rounding
+        // happen after Q*, and can push the order past MaxQtyCanon / MaxBuyNotional / MaxLevelsPerSide / haircut depth.
+        // Only the first MaxLevelsPerSide levels are walked, with the same haircut as Q* (R-03): the marginal level of
+        // this walk is the IOC limit, so the IOC can sweep FULL displayed size up to it and still fill the whole leg when
+        // only the haircut fraction is really there; VWAP / edge are priced at that (conservative) depth.
+        var caps = new FinalCaps(p);
+        ReadOnlySpan<PriceLevel> walkAsks = asks[..Math.Min(asks.Length, p.MaxLevelsPerSide)];
+        ReadOnlySpan<PriceLevel> walkBids = bids[..Math.Min(bids.Length, p.MaxLevelsPerSide)];
+        if (!TrySize(ctx, walkAsks, walkBids, p, caps, units, out Legs legs))
         {
-            return Unpriced(RejectReason.RejectThreshold, cross, askTob, bidTob, tobBps);
+            // Every cap is monotone in the common size (gross-up, lots, notional, levels, depth all grow with it):
+            // binary search for the largest size that fits; 0 → nothing fits → reject.
+            long lo = 0;
+            long hi = units;
+            Legs best = default;
+            while (hi - lo > 1)
+            {
+                long mid = lo + ((hi - lo) / 2);
+                if (TrySize(ctx, walkAsks, walkBids, p, caps, mid, out Legs candidate))
+                {
+                    lo = mid;
+                    best = candidate;
+                }
+                else
+                {
+                    hi = mid;
+                }
+            }
+
+            if (lo == 0)
+            {
+                return Unpriced(RejectReason.RejectThreshold, cross, askTob, bidTob, tobBps);
+            }
+
+            legs = best;
         }
 
+        long buyLots = legs.BuyLots;
+        long sellLots = legs.SellLots;
+        decimal sellQtyExact = legs.SellQtyExact;
+        VwapFill buyFill = legs.BuyFill;
+        VwapFill sellFill = legs.SellFill;
         if (!buy.MeetsMinimumsExact(buyLots, buyFill.NotionalUnits) || !sell.MeetsMinimumsExact(sellLots, sellFill.NotionalUnits))
         {
             return Unpriced(RejectReason.RejectMinNotional, cross, askTob, bidTob, tobBps);
@@ -229,11 +258,80 @@ public static class SpatialArbPricer
             SellWorstPx = sell.CanonicalPrice(sellFill.WorstPxTicks),
             BuyLevels = buyFill.LevelsUsed,
             SellLevels = sellFill.LevelsUsed,
-            BuyNotionalExact = buyFill.NotionalQuoteExact(buy),
+            BuyNotionalExact = legs.BuyNotionalExact,
             SellQtyExact = sellQtyExact,
             OptimizerQtyCanon = cross.QtyCanon,
             Edge = edge,
         };
+    }
+
+    /// <summary>Size both legs for <paramref name="units"/> common lots and check them against the exact caps.</summary>
+    private static bool TrySize(
+        SpatialPairContext ctx,
+        ReadOnlySpan<PriceLevel> asks,
+        ReadOnlySpan<PriceLevel> bids,
+        in SpatialParams p,
+        in FinalCaps caps,
+        long units,
+        out Legs legs)
+    {
+        InstrumentSpec buy = ctx.Buy;
+        InstrumentSpec sell = ctx.Sell;
+        legs = default;
+        legs.SellLots = units * ctx.Grid.LotsPerUnitB;
+        legs.SellQtyExact = sell.CanonicalQtyExact(legs.SellLots);
+        legs.BuyLots = p.BuyFee.Asset == FeeAssetKind.Base
+            ? LotNormalizer.GrossUpBuyLots(legs.SellQtyExact, p.BuyFee.Rate, buy)
+            : units * ctx.Grid.LotsPerUnitA;
+        if (caps.HasQty && (buy.CanonicalQtyExact(legs.BuyLots) > caps.Qty || legs.SellQtyExact > caps.Qty))
+        {
+            return false;
+        }
+
+        legs.BuyFill = VwapWalker.WalkLots(asks, legs.BuyLots, p.HaircutPpm);
+        legs.SellFill = VwapWalker.WalkLots(bids, legs.SellLots, p.HaircutPpm);
+        if (!legs.BuyFill.IsComplete || !legs.SellFill.IsComplete)
+        {
+            return false;
+        }
+
+        legs.BuyNotionalExact = legs.BuyFill.NotionalQuoteExact(buy);
+        return !caps.HasNotional || legs.BuyNotionalExact <= caps.Notional;
+    }
+
+    /// <summary>
+    /// Caps as exact decimals. A configured double converts to its shortest decimal form (600 → 600, 0.01 → 0.01), so an
+    /// order is compared with the number the operator wrote. +∞ (or beyond decimal range) = no cap.
+    /// </summary>
+    private readonly struct FinalCaps
+    {
+        private const double NoCapAbove = 1e27;
+
+        public FinalCaps(in SpatialParams p)
+        {
+            HasQty = p.MaxQtyCanon < NoCapAbove;
+            Qty = HasQty ? (decimal)p.MaxQtyCanon : 0m;
+            HasNotional = p.MaxBuyNotional < NoCapAbove;
+            Notional = HasNotional ? (decimal)p.MaxBuyNotional : 0m;
+        }
+
+        public bool HasQty { get; }
+
+        public decimal Qty { get; }
+
+        public bool HasNotional { get; }
+
+        public decimal Notional { get; }
+    }
+
+    private struct Legs
+    {
+        public long BuyLots;
+        public long SellLots;
+        public decimal SellQtyExact;
+        public decimal BuyNotionalExact;
+        public VwapFill BuyFill;
+        public VwapFill SellFill;
     }
 
     /// <summary>Reject before both legs were walked: execution columns NaN / 0 levels (→ NULL), TOB when known.</summary>
