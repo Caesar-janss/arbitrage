@@ -464,3 +464,47 @@ karena alasan lain (→ helper `expect_error_like`).
 | Benchmark | semua **0 B/op**; latency setara v0.2 dalam noise container (§4.3a STAGE1_CORE) |
 | Temuan sampingan saat menulis test | 3: test kontrak menghitung SQL yang di-comment-out; assert SQL R-02 lulus karena alasan lain; brute-force R-20 versi pertama tidak menangkap mutan apa pun |
 | Belum | C-01/C-02 (isi belum diterima), review Gemini, persetujuan Jansen → **Tahap 1 tetap REVIEW TERBUKA** |
+
+---
+
+# Ronde 2: review ChatGPT (PR #2 review 5732047500 @ `4bf87f7`)
+
+Temuan baru: C-07 (S1), C-08 (S2), serta C-01/C-02 (S2) yang sebelumnya menunggu triase. C-03…C-06 = DUPLICATE
+R-06/R-03/R-13/R-01 (reviewer mengonfirmasi reproduksi aslinya kini tertutup). Urutan kerja: S1 dulu.
+
+## C-07 (S1) — saldo stale dengan timestamp sama menimpa saldo yang lebih baru
+
+- **Test**: `Regression/C07_StaleBalanceOverwriteTests.cs` (6, API lama: urutan reviewer persis, perubahan tanpa reservasi
+  di ms yang sama, kedua urutan tiba, resolusi oleh observasi strictly later, duplikat, model acak 1.500 riwayat) dan
+  `Regression/C07_BalanceSequencingTests.cs` (8, API baru: kode hasil, stream berurut, replay, waktu mundur, stream vs
+  snapshot, model acak dengan stream berurut, stream tanpa snapshot tidak pernah konflik).
+- **Model acak**: riwayat venue asli (fill kita yang sudah di-reserve, perubahan tanpa reservasi seperti fee/transfer/deposit,
+  beberapa perubahan per ms); event stream dikirim berurutan tetapi terlambat; snapshot diberi stamp waktu venue saat
+  diambil dan dikirim dalam urutan acak. Invariant tiap langkah: `Available ≤ F(P) − Σ fill kita sesudah P`. Coverage guard:
+  ≥ 200 kejadian "observasi lama tiba dengan stamp terbaru dan nilai berbeda".
+- **MERAH (perilaku, API lama)**:
+  ```
+  FAIL …ReviewerSequence_StaleSameMsSnapshot_DoesNotRevivePaidFunds         Expected: 20  Actual: 100
+  FAIL …UnreservedChangeInTheSameMs_IsNotUndoneByAnOlderSnapshot             Expected: 95  Actual: 100
+  FAIL …ConflictKeepsTheLowerValue_InEitherArrivalOrder                      Expected: 50  Actual: 70
+  FAIL …StrictlyLaterObservation_ResolvesTheConflict                         Assert.True() Failure
+  FAIL …RandomInterleavings_NeverOverstateRelativeToTheNewestDeliveredObservation
+       seed 0 step 6 (DeliverSnapshot): Available 100 > bound 97 (newest delivered position 1, true value 97)
+  TOTAL: 1 passed, 5 failed
+  ```
+  (yang lulus: `IdenticalSameMsObservation_IsADuplicate_NotAConflict`, guard agar fix tidak membuat konflik palsu).
+  `C07_BalanceSequencingTests`: merah compile (`BalanceUpdate`, overload `OnBalance(…, long streamSequence)`,
+  `HasBalanceConflict` belum ada).
+- **Patch** (`InventoryLedger`): `OnBalance` mengembalikan `BalanceUpdate`. Tanpa nomor urut: `ms < last` → Stale;
+  `ms == last` → Duplicate bila nilai sama, selain itu Conflict (simpan nilai terkecil, `HasBalanceConflict`,
+  `NeedsReconcile`); `ms > last` → Applied, rilis reservasi terminal strictly earlier, konflik selesai. Dengan nomor urut
+  (stream user, 1 sumber per slot): seq naik → diurutkan menurut kiriman di dalam 1 ms; seq tidak naik → diperlakukan tanpa
+  urutan; waktu venue mundur → Conflict. Kontrak host di doc class dan `STAGE1_CORE.md` §0/§3.9.
+- **HIJAU**: `C07_StaleBalanceOverwriteTests 6 passed`, `C07_BalanceSequencingTests 8 passed`; full suite
+  `264 passed, 0 failed` (termasuk zero-alloc `InventoryLedger`).
+- **Mutation** (6 mutan, semua tertangkap): ambil nilai masuk saat konflik (7 test merah, termasuk kedua model acak); tanpa
+  flag konflik (4); abaikan `_orderedAtLast` (2, termasuk model acak berurut); replay dianggap berurut (1); waktu mundur
+  dibuang diam-diam (1); konflik tidak mematikan urutan (2, termasuk model acak berurut).
+- **Belum terbukti (NEEDS-DATA, Tahap 2)**: lag cache REST wallet tiap venue terhadap stream (menentukan batas bawah stamp
+  snapshot bila venue tidak memberi waktu as-of).
+

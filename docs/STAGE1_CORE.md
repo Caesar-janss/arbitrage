@@ -28,6 +28,7 @@
 | R-18 | gate funding & `RiskLimits.Validate` menolak NaN/∞ | – |
 | R-19 | dust dinilai di venue tempat ia berada (bid beli / ask jual) | – |
 | R-20 | kontrak semua enum ↔ SQL, brute force Q* dengan hurdle/cap/haircut, komentar SQL dibuang | – |
+| C-07 | dua observasi saldo di ms yang sama tanpa urutan → `Conflict`: simpan nilai **terkecil** + `NeedsReconcile`; stream user dengan nomor urut kirim diurutkan dalam 1 ms | stream: `OnBalance(slot, free, ms, seq)` (seq naik per slot, 1 sumber per slot); REST: stamp = waktu *as-of* venue atau batas bawahnya, **jangan** waktu terima lokal / waktu baru untuk data cache |
 
 Pure domain library: **zero dependency eksternal, tanpa I/O, deterministik**. Semua kalkulasi & state
 yang menentukan "masuk / tidak / bagaimana memperbaiki" ada di sini dan diuji tanpa API key.
@@ -186,6 +187,18 @@ atomik sehingga dua peluang tidak pernah memakai saldo yang sama.
 tercermin, dan event saldo di milidetik yang sama dengan fill (layanan venue yang berbeda) juga melepasnya (Available 0,05
 padahal 0,02 BTC). v0.3: rilis hanya oleh event *strictly later*; timeout memanggil `FlagUnsettled` → slot
 `NeedsReconcile` → rekonsiliasi REST (waktu server venue) masuk lewat `OnBalance`. Tidak pernah dilepas karena waktu.
+
+**Koreksi (C-07, review ChatGPT):** v0.3 masih bisa overstate. Stamp milidetik tidak mengurutkan dua observasi dari ms
+yang sama: snapshot REST yang terlambat (100) bisa menimpa saldo stream yang lebih baru (20) setelah reservasi dilepas,
+lalu reservasi 80 berhasil. Fix: `OnBalance` mengembalikan `BalanceUpdate` (`Applied / Duplicate / Stale / Conflict`).
+Observasi tanpa nomor urut (REST, koneksi kedua) diurutkan hanya oleh waktu venue; di ms yang sama dengan nilai berbeda
+→ `Conflict` → simpan nilai terkecil (salah satu dari keduanya adalah nilai terbaru, jadi yang terkecil tidak bisa
+overstate) dan tandai `NeedsReconcile`; observasi *strictly later* berikutnya menyelesaikannya. Satu stream user per slot
+memberi nomor urut kirim (`OnBalance(slot, free, ms, seq)`), sehingga beberapa fill dalam 1 ms tidak memicu rekonsiliasi
+palsu. Seq yang tidak naik → diperlakukan tanpa urutan; waktu venue mundur di stream berurut → `Conflict` (bukan dibuang,
+karena event yang dibuang bisa berupa debit). Klaim "tidak pernah overstate" berlaku **di bawah kontrak host** (§0 C-07)
+dan diuji dengan model acak (3.000 riwayat, invariant `Available ≤ F(P) − Σ fill kita sesudah P`, P = observasi terbaru
+secara kausal yang sudah diterima). Yang belum terbukti: lag cache REST per venue (NEEDS-DATA, ukur di Tahap 2).
 
 ### 3.10 Kesegaran data (R-07), grid spec (R-08), ID (R-17), persistensi (R-15, R-16)
 - `StaleDataGuard`: selain silence generik, **umur maks per strategi** (`BookTooOld`: spatial 1000 ms, funding 5000 ms) dan
