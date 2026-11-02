@@ -92,7 +92,7 @@ S1 wajib selesai sebelum tahap berikutnya.
 |---|---|---|---|---|
 | 0 ✅ | Blueprint + skema DB | Claude | — | test DB lulus |
 | 1 ✅ ditutup 2026-11-02 | `Arb.Core` | Claude | push repo → CI hijau | 0 temuan S1 terbuka ✅ |
-| S0 sekarang | Probe latency (ronde review Tahap 1 & CI ✅) | Claude (script probe) | jalankan probe dari Tokyo & Singapura | pilih pasangan venue (opsi a/b/c) |
+| S0 sekarang | Probe latency (ronde review Tahap 1 & CI ✅); `tools/latency_probe.py`, `docs/S0_LATENCY_PROBE.md` | Claude (script probe ✅) | jalankan probe dari Tokyo & Singapura (§1 doc S0) | pilih pasangan venue (opsi a/b/c) |
 | 2 | `Venues.Common` + 2 adapter: market data, sinkronisasi book, reconnect, clock offset, perekaman, replay test | Claude | rekam WS asli | replay 24 jam konsisten; gap → resync |
 | 3 | Engine paper end-to-end + Persistence writer | Claude | DB + VPS | partial fill, latency, fee, kaki gagal tercakup |
 | 4 | Gateway + user stream + recovery (testnet) + alert Telegram | Claude | testnet + chaos test | recovery tidak menggandakan order / melupakan eksposur |

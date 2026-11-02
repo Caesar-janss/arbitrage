@@ -6,6 +6,9 @@ TestResults/
 .vs/
 .idea/
 review_packets/
+__pycache__/
+*.pyc
+probe_*.json
 
 # Secrets never enter the repo (TEAM_WORKFLOW §5 rule 5, B-02). Keys live in the VPS env / secret store only.
 .env

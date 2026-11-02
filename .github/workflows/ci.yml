@@ -52,6 +52,14 @@ jobs:
           name: test-results
           path: TestResults
 
+  tools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tool tests (latency probe against a local TLS/WebSocket mock; stdlib only)
+        run: python3 -m unittest discover -s tools/tests -v
+
   db-schema:
     runs-on: ubuntu-latest
     timeout-minutes: 10
