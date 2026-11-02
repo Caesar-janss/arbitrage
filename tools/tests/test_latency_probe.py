@@ -290,6 +290,34 @@ class LatencyProbeTests(unittest.TestCase):
         finally:
             srv.shutdown()
 
+    def test_leg_uses_the_smaller_of_rest_and_ws(self):
+        # Binance in the first Tokyo run: REST 6.8 ms, WS LIST_SUBSCRIPTIONS 46.7 ms (server processing, TCP 5 ms)
+        t = {"rest_ms": {"n": 30, "p50": 6.79, "p99": 8.48}, "ws_ms": {"n": 30, "p50": 46.7, "p99": 164.3}}
+        self.assertEqual(lp.leg_ms(t, "p50"), 6.79)
+        self.assertEqual(lp.leg_ms(t, "p99"), 8.48)
+        self.assertEqual(lp.leg_ms({"rest_ms": {"n": 0}, "ws_ms": {"n": 3, "p50": 5.0}}, "p50"), 5.0)
+        self.assertIsNone(lp.leg_ms({"rest_ms": {"n": 0}, "ws_ms": {"n": 0}}, "p50"))
+
+    def test_hourly_files_merge_into_one_column_per_location(self):
+        def hour(label, v, p99):
+            return {"label": label, "started_utc": label, "ended_utc": label, "host": {}, "targets": {
+                n: {"venue": "x", "rest_ms": {"n": 10, "p50": v, "p90": v, "p99": p99, "max": p99}, "ws_ms": {"n": 0},
+                    "tcp_ms": {"n": 0}, "tls_ms": {"n": 0}, "offset_ms": {"n": 10, "median": 1.0, "p10": 0.5, "p90": 1.5},
+                    "errors": {"rest:TimeoutError": 1}} for n in ("binance-spot", "bitget", "bybit-spot")}}
+        paths = []
+        for i, (v, p99) in enumerate([(5, 9), (7, 30), (6, 12)], start=1):
+            p = os.path.join(self.tmp, f"hourly_{i}.json")
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump(hour(f"tokyo-h{i:02d}", v, p99), fh)
+            paths.append(p)
+        md = lp.compare(paths)
+        self.assertIn("**tokyo**", md)
+        self.assertIn("3 jam", md)
+        self.assertIn("| binance-spot | 6.00 / 30.0 |", md)                  # median of hourly p50, worst hourly p99
+        self.assertIn("(3 err)", md)
+        self.assertIn("## Per jam", md)
+        self.assertIn("| 02 | 7.00 |", md)
+
     def test_percentile(self):
         self.assertEqual(lp.pct([3, 1, 2], 0.5), 2)
         self.assertAlmostEqual(lp.pct(list(range(101)), 0.99), 99.0)

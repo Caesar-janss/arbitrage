@@ -32,6 +32,7 @@ import json
 import os
 import platform
 import random
+import re
 import socket
 import ssl
 import statistics
@@ -436,11 +437,54 @@ def _fmt(x) -> str:
 
 
 def leg_ms(target: dict, q: str) -> Optional[float]:
-    """Origin round trip of one leg: WS ping if available (market-data path), else REST."""
-    ws, rest = target.get("ws_ms", {}), target.get("rest_ms", {})
-    if ws.get("n"):
-        return ws.get(q)
-    return rest.get(q) if rest.get("n") else None
+    """
+    Origin round trip of one leg: the SMALLER of REST time and WS ping. Both are network round trip + server processing;
+    the smaller one bounds the network part. Needed because some venues answer an application-level WS request slowly
+    (first Tokyo run: Binance LIST_SUBSCRIPTIONS 47 ms while TCP to stream.binance.com was 5 ms and REST 7 ms).
+    """
+    vals = [m.get(q) for m in (target.get("ws_ms", {}), target.get("rest_ms", {})) if m.get("n") and m.get(q) is not None]
+    return min(vals) if vals else None
+
+
+_HOUR = re.compile(r"^(?P<base>.+)-h(?P<hour>\d+)$")
+
+
+def merge_hourly(runs: list[dict]) -> tuple[list[dict], dict]:
+    """
+    Merge result files labelled <base>-hNN (the 24-hour loop) into one run per base. Percentiles cannot be merged exactly
+    from summaries, so: p50 = median of hourly p50, p90/p99/max = worst hourly value, offset median = median of hourly
+    medians, offset p10/p90 = min/max. Also returns {base: {hour: run}} for the per-hour table.
+    """
+    groups: dict = {}
+    singles = []
+    for r in runs:
+        m = _HOUR.match(r["label"])
+        if m:
+            groups.setdefault(m["base"], {})[int(m["hour"])] = r
+        else:
+            singles.append(r)
+    merged = []
+    for base, hours in groups.items():
+        rs = [hours[h] for h in sorted(hours)]
+        out = {"label": base, "started_utc": rs[0]["started_utc"], "ended_utc": rs[-1].get("ended_utc"),
+               "host": rs[0].get("host", {}), "hours": len(rs), "targets": {}}
+        names = sorted({n for r in rs for n in r["targets"]})
+        for n in names:
+            ts = [r["targets"][n] for r in rs if n in r["targets"]]
+            t = {"venue": ts[0].get("venue"), "errors": {}}
+            for k in ("rest_ms", "ws_ms", "tcp_ms", "tls_ms"):
+                xs = [x[k] for x in ts if x.get(k, {}).get("n")]
+                t[k] = {"n": sum(x["n"] for x in xs), "p50": round(statistics.median(x["p50"] for x in xs), 3),
+                        "p90": max(x["p90"] for x in xs), "p99": max(x["p99"] for x in xs), "max": max(x["max"] for x in xs)} if xs else {"n": 0}
+            offs = [x["offset_ms"] for x in ts if x.get("offset_ms", {}).get("n")]
+            t["offset_ms"] = {"n": sum(o["n"] for o in offs), "median": round(statistics.median(o["median"] for o in offs), 3),
+                              "p10": min(o["p10"] for o in offs), "p90": max(o["p90"] for o in offs)} if offs else {"n": 0}
+            for x in ts:
+                for e, c in (x.get("errors") or {}).items():
+                    t["errors"][e] = t["errors"].get(e, 0) + c
+            out["targets"][n] = t
+        merged.append(out)
+    return singles + merged, groups
 
 
 def pair_worst_leg(run_result: dict, a: str, b: str) -> Optional[dict]:
@@ -460,11 +504,13 @@ def compare(files: list[str]) -> str:
     for f in files:
         with open(f, encoding="utf-8") as fh:
             runs.append(json.load(fh))
+    runs, hourly = merge_hourly(runs)
     lines = ["# Hasil probe latency S0", ""]
     for r in runs:
         h = r.get("host", {})
         where = h.get("aws_availability_zone") or h.get("aws", "?")
         lines.append(f"- **{r['label']}**: {r['started_utc']} → {r.get('ended_utc')}, host `{h.get('hostname')}`, AWS `{where}`"
+                     + (f", {r['hours']} jam (p50 = median per jam, p99 = jam terburuk)" if r.get("hours") else "")
                      + (" (dihentikan manual)" if r.get("interrupted") else ""))
     lines += ["", "## Per target (ms; p50 / p99)", "",
               "| Target | " + " | ".join(f"{r['label']} REST | {r['label']} WS | {r['label']} TCP | {r['label']} offset" for r in runs) + " |",
@@ -496,9 +542,23 @@ def compare(files: list[str]) -> str:
         lines.append(f"| {a} ↔ {b} | " + " | ".join(cells) + " |")
     lines += ["", "Region terbaik per pasangan (p50 kaki terlambat): "
               + "; ".join(f"{a}↔{b}: **{lab}** ({_fmt(v)} ms)" for (a, b), (lab, v) in best.items()), "",
+              "Kaki = RTT origin terkecil antara REST time dan WS ping (keduanya = jaringan + waktu proses server).",
               "Catatan: RTT dari endpoint publik (REST time / WS ping), bukan jalur order entry; offset = jam venue − jam host",
               "(+ = venue lebih cepat), valid hanya bila host tersinkron NTP (lihat field `host.clock_*`). TCP sering berhenti di",
               "edge CDN, jadi yang menentukan adalah REST/WS (origin)."]
+    if hourly:
+        bases = sorted(hourly)
+        lines += ["", "## Per jam: kaki terlambat p50 (ms)", "",
+                  "| Jam ke | " + " | ".join(f"{b}: {a}↔{c}" for b in bases for a, c in PAIRS) + " |",
+                  "|---|" + "---|" * (len(bases) * len(PAIRS))]
+        for hour in sorted({h for b in bases for h in hourly[b]}):
+            cells = []
+            for b in bases:
+                r = hourly[b].get(hour)
+                for a, c in PAIRS:
+                    w = pair_worst_leg(r, a, c) if r else None
+                    cells.append(_fmt(w["p50"]) if w else "–")
+            lines.append(f"| {hour:02d} | " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 
