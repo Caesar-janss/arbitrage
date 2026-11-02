@@ -5,9 +5,10 @@ Multi-Strategy Crypto Arbitrage Engine (Spatial + Funding Rate) — .NET 8 + Pos
 ## Status
 | Tahap | Isi | Dokumen |
 |---|---|---|
-| 0 | Blueprint + skema PostgreSQL (7 migrasi, 119 assertion; V007 = fix review ronde 1) | `docs/ARCHITECTURE.md` |
-| **1** | **`Arb.Core` v0.3: pricing, order book seqlock, state machine, risk, inventory (250 test, 0 B/op hot path) — REVIEW TERBUKA (patch ronde 1 di draft PR #2)** | **`docs/STAGE1_CORE.md`, `docs/review/FINDINGS_LOG.md`, `docs/review/stage1/REGRESSION_LOG.md`** |
-| 2 | Adapter venue (Bitget/Bybit/Binance) — menunggu keputusan venue/region (STAGE1_CORE §5) | — |
+| 0 | Blueprint + skema PostgreSQL (8 migrasi, 124 assertion; V007/V008 = fix review) | `docs/ARCHITECTURE.md` |
+| 1 ✅ | `Arb.Core`: pricing, order book seqlock, state machine, risk, inventory (323 test, 0 B/op hot path). Review 4 ronde: 33 laporan (Claude-R 20, ChatGPT 10 termasuk 4 duplikat, builder 3), semua S1/S2 di-fix dengan regression merah→hijau. **DITUTUP 2026-11-02 (persetujuan Jansen setelah recheck menyeluruh)** | `docs/STAGE1_CORE.md`, `docs/review/FINDINGS_LOG.md`, `docs/review/stage1/REGRESSION_LOG.md` |
+| **S0** | **Probe latency Tokyo/Singapura → pilih pasangan venue (sekarang)** | `docs/STAGE1_CORE.md` §5 |
+| 2 | Adapter venue (Bitget/Bybit/Binance) — menunggu hasil S0; wajib membuktikan kewajiban I-1…I-3 (STAGE1_CORE §6.1) | — |
 
 ## Struktur
 ```

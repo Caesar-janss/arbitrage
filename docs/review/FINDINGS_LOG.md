@@ -6,7 +6,7 @@ bukti dijadikan test xUnit yang gagal sebelum fix (syarat `TEAM_WORKFLOW.md` §5
 
 ## Tahap 1 — `Arb.Core`, ronde 1 (versi v0.2 / `93df9953f26c`)
 
-**Status Tahap 1: REVIEW TERBUKA.** Ditutup hanya jika (1) setiap temuan S1/S2 CONFIRMED punya fix + regression test
+**Status Tahap 1: DITUTUP 2026-11-02 (persetujuan Jansen setelah recheck menyeluruh).** Semua syarat di bawah terpenuhi. Syarat semula: ditutup hanya jika (1) setiap temuan S1/S2 CONFIRMED punya fix + regression test
 yang tercatat gagal sebelum fix dan lulus sesudahnya (`docs/review/stage1/REGRESSION_LOG.md`), (2) C-01/C-02 sudah
 ditriase, (3) fix S1 (R-01, R-02) di-review ulang oleh ChatGPT pada paket v0.3, (4) Jansen menyetujui secara eksplisit.
 Patch v0.3 tidak mengubah status ini. (Syarat (3) semula "review Gemini". Gemini keluar dari tim 2026-10-27, lihat
@@ -16,7 +16,8 @@ Progres syarat penutupan (2026-11-02, setelah re-review ChatGPT 5732867198 @ `a0
 (1) **terpenuhi**: semua S1/S2 CONFIRMED (R-xx, C-01…C-10) punya fix + regression merah→hijau; (2) **terpenuhi**:
 C-01/C-02 ditriase dan di-fix; (3) **terpenuhi**: re-review ChatGPT atas semua fix S1. R-01, R-02 diterima dalam lingkup
 Core (ronde 2); C-07 reproduksi asli, C-08/C-02/C-01 (ronde 3); C-09 termasuk varian duplikat builder, dan C-10 (ronde 4),
-tanpa blocker baru; (4) **belum**: persetujuan eksplisit Jansen. Batas integrasi dari reviewer dipindah ke
+tanpa blocker baru; (4) **terpenuhi** (2026-11-02, `TEAM_WORKFLOW.md` §9), setelah recheck menyeluruh builder dari
+clone bersih; tiga temuan recheck (B-01…B-03, di bawah) di-fix sebelum penutupan. Batas integrasi dari reviewer dipindah ke
 `STAGE1_CORE.md` §6.1 (I-1…I-11) sebagai kewajiban Tahap 2+, bukan temuan terbuka.
 Versi yang di-review terakhir: `a029256`, `make_review_packet.py --version` = `3683d7eeb281`. Commit sesudahnya hanya
 dokumentasi (§6.1 dan log ini; `src/`, `tests/`, `db/` identik dengan `a029256`), hash `b02b0fd9762e`.
@@ -95,6 +96,18 @@ perubahan harga, recovery) → `STAGE1_CORE.md` §6.1.
 Usulan "satu lot perp" ditolak reviewer dengan benar (lot BTC 0,001 ≈ 60 USDT). Fix memakai budget risiko dalam quote dan
 ditegakkan di `TradeGroup`, bukan panggilan host opsional.
 
+### Builder — recheck penutupan (2026-11-02, dari clone bersih `dc32259`)
+
+| ID | Sev | Area | Klaim (ringkas) | Status | Bukti | Fix |
+|---|---|---|---|---|---|---|
+| B-01 | S3 | FixedPoint.ToUnits | hasil bagi ±∞ → `long.MinValue` alih-alih exception (Down sejak C-01, Up sejak v0.2) | CONFIRMED | probe nilai ekstrem + 5 test merah | `74c82a7` |
+| B-02 | S4 | .gitignore | file rahasia (`.env`, `*.pem`, …) tidak dikecualikan | CONFIRMED | test merah + `git check-ignore` | `8b24145` |
+| B-03 | S4 | REGRESSION_LOG (resep) | resep reproduksi membuang `db/tests` → merah SQL tidak bisa direproduksi | CONFIRMED | replay 6 commit SQL | docs |
+
+Replay merah→hijau dari clone bersih: 25 commit fix C# dan 6 commit fix SQL semuanya merah lalu hijau (detail di
+`REGRESSION_LOG.md`). B-01 mengubah kode sesudah review ChatGPT terakhir; S3, jadi re-review tidak wajib (§5), tetapi
+diff-nya kecil (2 guard) dan boleh dicek ChatGPT di PR berikutnya.
+
 ### Koreksi atas klaim Claude sendiri (dari ronde ini)
 - `STAGE1_CORE` §3.9 "available tidak pernah overstated": **salah** (R-06).
 - §3.6 menyarankan cross margin di akun strategi tanpa menyebut prasyarat "satu posisi per akun". Model per posisi tidak aman untuk multi-pair (R-01).
@@ -128,6 +141,7 @@ ditegakkan di `TradeGroup`, bukan panggilan host opsional.
 | Claude-R | 20 | 20 | 0 | 19 | 1 (R-05, data ARM64) | 0 | 0 | 95% (19/20) |
 | ChatGPT | 10 | 6 (1 dari observasi builder: C-10) | 4 | 6 (C-07, C-09, C-10 S1; C-01, C-02, C-08 S2) | 0 | 0 | 0 | 100% (6/6) |
 | Gemini | — | | | | | | | keluar dari tim 2026-10-27, tidak menyerahkan review |
+| Builder (recheck) | 3 | 3 | 0 | 3 (B-01 S3; B-02, B-03 S4) | 0 | 0 | 0 | 100% (3/3); di luar itu builder menemukan varian C-09 dan observasi asal C-10 |
 
 Aturan hitung: "Unik" = tidak tumpang-tindih dengan temuan yang tercatat lebih dulu. DUPLICATE tidak menambah skor
 temuan, tetapi koreksi label (R-01) dicatat di atas sebagai kontribusi review. C-10 dihitung CONFIRMED untuk ChatGPT,

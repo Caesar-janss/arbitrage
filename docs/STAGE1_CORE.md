@@ -1,6 +1,7 @@
 # Tahap 1 — `Arb.Core` (v0.3)
 
-> **Status: REVIEW TERBUKA.** v0.3 = patch untuk 20 temuan review ronde 1 (Claude-R). Setiap patch didahului
+> **Status: DITUTUP 2026-11-02 (persetujuan Jansen setelah recheck menyeluruh).** Review 4 ronde (Claude-R, ChatGPT ×3) + recheck builder; kewajiban integrasi yang dibawa ke
+> Tahap 2+ ada di §6.1. v0.3 = patch untuk 20 temuan review ronde 1 (Claude-R). Setiap patch didahului
 > regression test yang terbukti merah di kode lama ([`review/stage1/REGRESSION_LOG.md`](review/stage1/REGRESSION_LOG.md)).
 > Klaim v0.2 yang dibantah review dikoreksi di bawah dan ditandai **(R-xx)**. Triase lengkap ada di
 > [`review/FINDINGS_LOG.md`](review/FINDINGS_LOG.md).

@@ -10,12 +10,18 @@ Untuk commit fix `<sha>` dari temuan `R-xx` (lihat tabel di `FINDINGS_LOG.md`):
 
 ```bash
 git checkout <sha>
-git diff <sha>^ <sha> -- src db | git apply -R   # buang patch src/db (termasuk file baru), test baru tetap ada
+git diff <sha>^ <sha> -- src db/migrations | git apply -R   # buang patch kode & migrasi; test C# dan db/tests tetap versi fix
 dotnet test tests/Arb.Core.Tests -c Release --filter "FullyQualifiedName~Rxx_"   # harus MERAH
-git checkout -- src db                         # kode SESUDAH patch
+bash db/tests/run_tests.sh                                 # bila temuan menyentuh SQL: harus MERAH (exit ≠ 0)
+git checkout -- src db                                     # kode SESUDAH patch
 dotnet test tests/Arb.Core.Tests -c Release --filter "FullyQualifiedName~Rxx_"   # harus HIJAU
-bash db/tests/run_tests.sh             # bila temuan menyentuh SQL
+bash db/tests/run_tests.sh                                 # harus ALL TESTS PASSED
 ```
+
+Koreksi resep (B-03, recheck penutupan): versi lama memakai `-- src db`, yang ikut membuang blok regression di
+`db/tests/test_schema.sql`, sehingga merah SQL tidak pernah bisa direproduksi lewat resep. Bila build gagal karena file test
+API baru (merah compile), pindahkan sementara file itu (dan test API baru di file lain, mis. `ZeroAllocationTests` untuk
+R-01) untuk melihat merah perilaku dari test API lama; R-09 menyimpan keduanya dalam satu file (hapus test ke-4 dulu).
 
 "MERAH (compile)" = test memakai API yang belum ada di kode pra-patch. Itu merah yang sah: perilaku yang diminta
 memang tidak bisa diekspresikan oleh kode lama. Bila memungkinkan, test juga memuat assert perilaku pada API lama.
@@ -736,4 +742,67 @@ holding delta-netral, tetapi `TradeGroup` hanya mengecek bahwa perp **ada** (spa
 | Mutation | C-09 11 dijalankan (8 tertangkap di desain akhir; 3 lolos di versi pertama → 1 mengubah desain jadi lebih sederhana dan lebih live, 1 hilang bersama state yang dihapus, 1 dikunci test presisi); C-10 6/6 |
 | Benchmark | 0 B/op semua; `InventoryLedger` 481,6 → 453,6 ns/op, pricer dan state machine dalam noise (A/B bergantian 4× vs `30417db`) |
 | Belum | re-review ChatGPT untuk fix C-09 dan C-10 (S1), persetujuan Jansen → **Tahap 1 tetap REVIEW TERBUKA** |
+
+---
+
+# Recheck penutupan Tahap 1 (builder, 2026-11-02)
+
+Permintaan Jansen: recheck menyeluruh sebelum menutup. Semua dari **clone bersih** `stage1/review-r1` @ `dc32259` (130 file,
+index identik dengan repo kerja).
+
+| Cek | Hasil |
+|---|---|
+| Build harness offline | 0 warning |
+| Test C# | 317/317 offline; CI xUnit asli @ `dc32259` 317/317 (dua run) |
+| DB dari nol | V001…V008, 124 assertion, `ALL TESTS PASSED` |
+| Benchmark | semua 0 B/op |
+| V008 vs V007 | fungsi trigger identik kecuali satu klausa C-08 (diff baris) |
+| SHA di docs + body PR | 39 referensi, semua commit di riwayat HEAD; 30 pasangan temuan ↔ commit cocok |
+| File regression | setiap temuan (kecuali R-05 REJECTED) punya file `Regression/<ID>_*` |
+| TODO / placeholder / secret | tidak ada (satu "Placeholder" = sentinel R-15 yang terdokumentasi); generator paket lulus guard credential |
+| **Replay merah→hijau semua fix** | 25 commit C#: merah lalu hijau semua; 6 commit SQL (R-02, R-10, R-14, R-15, R-16, C-08): merah lalu hijau, pesan cocok dengan log. Catatan: R-01/R-13/R-16/R-17/R-20(e) merah compile sesuai log; R-09 merah perilaku 3 test terkonfirmasi setelah test ke-4 (API baru) dikeluarkan |
+
+Temuan recheck (prefix **B** = builder, baru, agar metrik reviewer tetap jujur):
+
+## B-01 (S3) — `FixedPoint.ToUnits` mengembalikan `long.MinValue` untuk hasil bagi ±∞
+
+- **Ditemukan**: probe nilai ekstrem pada kode ronde 2–4. `ToUnits(1e300, 1e-300, Down/Up)` → `-9223372036854775808`.
+  Akar: ∞ − ∞ = NaN di toleransi, dan NaN lolos `r >= 9.2e18 || r <= -9.2e18`. `Down` rusak sejak C-01 (`122309d`);
+  `Up` sudah begitu sejak v0.2 (`ceil(∞ − ∞)`). Dampak praktis nihil (pemanggil memberi nilai kecil & finite), tetapi
+  fail-open pada input tidak valid, kelas yang sama dengan R-18.
+- **Test**: `Regression/B01_NonFiniteGridQuotientTests.cs` (5, API lama: 4 kombinasi ±∞ untuk Down & Up; properti 100.000
+  input ekstrem "throw atau tetap dalam satu unit", coverage ≥ 10.000 overflow).
+- **MERAH (perilaku)**:
+  ```
+  FAIL …QuotientOverflowingToInfinity_Throws(1E+300, 1E-300)       no exception, expected OverflowException
+  FAIL …QuotientOverflowingToInfinity_Throws(-1E+300, 1E-300)      no exception, expected OverflowException
+  FAIL …QuotientOverflowingToInfinity_Throws(1.797…E+308, 0.5)     no exception, expected OverflowException
+  FAIL …QuotientOverflowingToInfinity_Throws(-1.797…E+308, 0.25)   no exception, expected OverflowException
+  FAIL …RandomExtremeInputs_EitherThrowOrStayWithinOneUnit
+       value -1.3356666762082214E+110 unit 1.4539686930151512E-275 x -Infinity → -9223372036854775808
+  TOTAL: 0 passed, 5 failed
+  ```
+- **Patch**: hasil bagi non-finite → `OverflowException`; cek rentang ditulis `!(r < 9.2e18 && r > -9.2e18)` sehingga NaN
+  juga gagal.
+- **HIJAU**: 5 passed; full suite 322 passed.
+- **Mutation**: tiap guard dilepas sendiri-sendiri → lolos (keduanya redundan by design: masing-masing sudah menutup kasus
+  ini); keduanya dilepas → 5 test merah.
+
+## B-02 (S4) — `.gitignore` tidak mengecualikan file rahasia
+
+- **Ditemukan**: scan keamanan recheck. Aturan §5 TEAM_WORKFLOW: key tidak pernah masuk repo. Mulai Tahap 2 key ada di
+  env/config VPS; `git add -A` di VPS bisa meng-commit `.env` / `*.pem` (GitGuardian baru menandai setelah push).
+- **Test**: `Regression/B02_SecretFilesIgnoredTests.cs`. **MERAH**: `.gitignore misses: .env, .env.*, *.pem, *.key, *.p12,
+  *.pfx, secrets*.json, *.secrets.json, appsettings.*.local.json`. **Patch**: pola ditambahkan. **HIJAU**: 1 passed.
+  Perilaku dicek `git check-ignore`: `.env`, `.env.production`, `bitget.pem`, `api.key`, `cert.pfx`, `secrets.json`,
+  `bybit.secrets.json`, `appsettings.Production.local.json` → diabaikan; `*.csproj`, `README.md` → tetap dilacak; 0 file
+  yang sudah dilacak ikut terabaikan.
+
+## B-03 (S4, docs) — resep reproduksi tidak bisa memerahkan test SQL
+
+Lihat "Koreksi resep" di atas. Ditemukan saat replay: semua "db-red" pertama tampak lulus karena resep lama ikut membuang
+`db/tests`. Diulang dengan resep yang dikoreksi → keenam merah SQL tereproduksi.
+
+**Hasil recheck: OK** setelah B-01…B-03 di-fix (full suite 323/323 offline). Sesuai keputusan Jansen ("kalau sudah ok bisa
+kita tutup dan lanjut"), **Tahap 1 DITUTUP 2026-11-02**. Kewajiban integrasi I-1…I-11 dibawa ke Tahap 2+.
 

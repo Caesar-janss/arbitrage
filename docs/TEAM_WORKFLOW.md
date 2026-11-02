@@ -62,7 +62,7 @@ hanya cadangan untuk reviewer tanpa akses repo.
 4. Masalah terbuka + pekerjaan berikutnya.
 
 ## 5. Temuan & triase
-Format: `docs/review/FINDINGS_TEMPLATE.md` (prefix C/R/J; prefix G tidak dipakai lagi; severity S1–S4).
+Format: `docs/review/FINDINGS_TEMPLATE.md` (prefix C/R/J, B = temuan builder sendiri; prefix G tidak dipakai lagi; severity S1–S4).
 
 | Status | Syarat |
 |---|---|
@@ -91,8 +91,8 @@ S1 wajib selesai sebelum tahap berikutnya.
 | Tahap | Isi | Builder | Data/ops (Jansen) | Gate keluar |
 |---|---|---|---|---|
 | 0 ✅ | Blueprint + skema DB | Claude | — | test DB lulus |
-| 1 ✅ review | `Arb.Core` | Claude | push repo → CI hijau | 0 temuan S1 terbuka |
-| S0 sekarang | Ronde review Tahap 1 · CI GitHub · probe latency | Claude (script probe) | jalankan probe dari Tokyo & Singapura | pilih pasangan venue (opsi a/b/c) |
+| 1 ✅ ditutup 2026-11-02 | `Arb.Core` | Claude | push repo → CI hijau | 0 temuan S1 terbuka ✅ |
+| S0 sekarang | Probe latency (ronde review Tahap 1 & CI ✅) | Claude (script probe) | jalankan probe dari Tokyo & Singapura | pilih pasangan venue (opsi a/b/c) |
 | 2 | `Venues.Common` + 2 adapter: market data, sinkronisasi book, reconnect, clock offset, perekaman, replay test | Claude | rekam WS asli | replay 24 jam konsisten; gap → resync |
 | 3 | Engine paper end-to-end + Persistence writer | Claude | DB + VPS | partial fill, latency, fee, kaki gagal tercakup |
 | 4 | Gateway + user stream + recovery (testnet) + alert Telegram | Claude | testnet + chaos test | recovery tidak menggandakan order / melupakan eksposur |
@@ -116,6 +116,10 @@ Peran dirotasi berdasarkan angka ini.
 Q: Gemini tetap di tim? A: **Tidak** (2026-10-27): tidak bisa akses repo, relay manual tidak sepadan dengan waktunya.
 Project dikerjakan Claude + ChatGPT (peran di §2).
 Q: ChatGPT akses repo? A: **Ya**, tersambung langsung ke repo (2026-10-27) → review dilakukan di PR, bukan lewat paket.
+Q: Tahap 1 (`Arb.Core`) ditutup? A: **Ya** (2026-11-02): "recheck secara keseluruhan, kalau sudah ok bisa kita tutup dan
+lanjut". Recheck dari clone bersih lulus (`REGRESSION_LOG.md`, "Recheck penutupan"); temuan recheck B-01…B-03 di-fix
+dulu. Penutupan ≠ siap live: kewajiban I-1…I-11 (`STAGE1_CORE.md` §6.1) tetap berlaku.
+Q: `RiskLimits.MaxHoldingDeltaQuote`? A: **1 USDT** (2026-11-02): default yang diusulkan, dijawab "okk"; bisa diubah di config.
 
 Terbuka:
 - Pasangan venue spatial (opsi a/b/c, `STAGE1_CORE.md` §5), setelah data probe latency.
