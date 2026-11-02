@@ -90,8 +90,10 @@ Test kontrak SQL membaca **semua** `db/migrations/V*.sql` (dicari ke atas dari f
 | Saldo, eksposur dari fill, reservasi | `decimal` | exact terhadap angka venue; bukan jalur per-tick |
 
 Setiap konversi kembali ke grid venue memakai arah pembulatan **eksplisit** (`Rounding.Down/Up`).
-Temuan saat verifikasi: `6005000 × 0.999` dalam `double` bisa jatuh 1 tick di bawah. Limit price repair
-sekarang dihitung dengan `decimal`, dan `FixedPoint.ToUnits` memakai toleransi relatif (1e-12·|x|).
+Temuan saat verifikasi: konversi double ke grid bisa jatuh tepat di bawah titik grid (contoh nyata: `0,01 / 0,00001` =
+999,9999999999999; `517,0694639999999 / 1e-6` = 517069463,99999994). Limit price repair sekarang dihitung dengan `decimal`.
+(Koreksi C-01: versi lama teks ini menyebut `6005000 × 0,999` sebagai contoh; hasil itu justru exact 5998995,0 dalam
+`double`, jadi contohnya salah.) v0.3 memakai toleransi relatif (1e-12·|x|).
 
 **Koreksi (C-01, review ChatGPT):** toleransi relatif 1e-12·|x| itu sendiri salah: di |x| ≈ 1e12 ia mencapai satu unit
 penuh, sehingga `Down` menaikkan integer exact (1e12 → 1e12 + 1) dan `Up` menurunkannya. v0.3+: toleransi = 1e-9 + 16 ulp
