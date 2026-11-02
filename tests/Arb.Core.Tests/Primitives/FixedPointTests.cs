@@ -94,7 +94,8 @@ public class FixedPointTests
     [Fact]
     public void FixedPointToUnits_AbsorbsFloatingNoiseAtLargeMagnitudes()
     {
-        // 6005000 × 0.999 is not exactly representable; must still floor to 5998995 (not 5998994).
+        // 6005000 × 0.999 happens to be exact (5998995.0) in double; kept as a regression value. Real noise cases:
+        // 0.01 / 0.00001 = 999.9999999999999 below, and the 1–2 ulp chains in C01_GridSnapBoundTests.
         Assert.Equal(5998995L, FixedPoint.ToUnits(6005000 * 0.999, 1.0, Rounding.Down));
         Assert.Equal(1000L, FixedPoint.ToUnits(0.01, 0.00001, Rounding.Down));
         Assert.Equal(1000L, FixedPoint.ToUnits(0.01, 0.00001, Rounding.Up));

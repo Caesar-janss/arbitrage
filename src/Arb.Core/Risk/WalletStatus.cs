@@ -3,7 +3,11 @@ using Arb.Core.Primitives;
 
 namespace Arb.Core.Risk;
 
-/// <summary>Canonical chain/network id (adapter maps venue names: Binance "ETH" / Bybit "ETH" / Bitget "ERC20" → same id).</summary>
+/// <summary>
+/// Canonical chain/network id (adapter maps venue names: Binance "ETH" / Bybit "ETH" / Bitget "ERC20" → same id).
+/// 0 = UNMAPPED (adapter could not map the venue's name). Unmapped networks never match each other and never form a
+/// route (R-09: two unmapped networks used to match as "network 0").
+/// </summary>
 public readonly struct NetworkId : IEquatable<NetworkId>
 {
     public NetworkId(ushort value)
@@ -12,6 +16,8 @@ public readonly struct NetworkId : IEquatable<NetworkId>
     }
 
     public ushort Value { get; }
+
+    public bool IsValid => Value != 0;
 
     public bool Equals(NetworkId other) => Value == other.Value;
 
@@ -88,10 +94,21 @@ public sealed class WalletStatusBook
         _slots = new WalletNetworkStatus[]?[VenueSlots * _assetCapacity];
     }
 
-    public void Update(Venue venue, AssetId asset, ReadOnlySpan<WalletNetworkStatus> networks)
+    /// <summary>Replace the networks of (venue, asset). Returns how many were UNMAPPED (ignored by every check → alert).</summary>
+    public int Update(Venue venue, AssetId asset, ReadOnlySpan<WalletNetworkStatus> networks)
     {
         int slot = Slot(venue, asset);
+        int unmapped = 0;
+        for (int i = 0; i < networks.Length; i++)
+        {
+            if (!networks[i].Network.IsValid)
+            {
+                unmapped++;
+            }
+        }
+
         Volatile.Write(ref _slots[slot], networks.ToArray());
+        return unmapped;
     }
 
     public bool IsDepositEnabled(Venue venue, AssetId asset, long nowUnixMs, long maxAgeMs) =>
@@ -110,9 +127,16 @@ public sealed class WalletStatusBook
         }
 
         bool anyStale = false;
+        bool anyUnmapped = false;
         for (int i = 0; i < src.Length; i++)
         {
             ref readonly WalletNetworkStatus s = ref src[i];
+            if (!s.Network.IsValid)
+            {
+                anyUnmapped = true;
+                continue;
+            }
+
             if (nowUnixMs - s.UpdatedUnixMs > maxAgeMs)
             {
                 anyStale = true;
@@ -145,7 +169,13 @@ public sealed class WalletStatusBook
             }
         }
 
-        return new TransferRoute(anyStale ? RouteStatus.Unknown : RouteStatus.Closed, default);
+        for (int j = 0; j < dst.Length && !anyUnmapped; j++)
+        {
+            anyUnmapped = !dst[j].Network.IsValid;
+        }
+
+        // an unmapped network MIGHT be a real route we cannot see: Unknown (= closed for guards), never Open
+        return new TransferRoute(anyStale || anyUnmapped ? RouteStatus.Unknown : RouteStatus.Closed, default);
     }
 
     private bool Any(Venue venue, AssetId asset, long nowUnixMs, long maxAgeMs, bool deposit)
@@ -159,7 +189,7 @@ public sealed class WalletStatusBook
         for (int i = 0; i < nets.Length; i++)
         {
             ref readonly WalletNetworkStatus n = ref nets[i];
-            if (nowUnixMs - n.UpdatedUnixMs <= maxAgeMs && (deposit ? n.IsDepositEnabled : n.IsWithdrawEnabled))
+            if (n.Network.IsValid && nowUnixMs - n.UpdatedUnixMs <= maxAgeMs && (deposit ? n.IsDepositEnabled : n.IsWithdrawEnabled))
             {
                 return true;
             }

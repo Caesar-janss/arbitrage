@@ -2,7 +2,6 @@
 """Build ONE self-contained review packet (prompt + manifest + line-numbered files) for an external reviewer.
 
 Usage:
-  python3 tools/make_review_packet.py --profile gemini  --stage "Tahap 1 (Arb.Core)"
   python3 tools/make_review_packet.py --profile chatgpt --stage "Tahap 1 (Arb.Core)" --out review_packets/x.md
   python3 tools/make_review_packet.py --version          # print repo version hash only
 
@@ -37,7 +36,6 @@ SOURCE_GLOBS = [
 ]
 
 PROFILES = {
-    "gemini": {"prompt": "docs/review/prompts/gemini.md", "include": SOURCE_GLOBS},
     "claude": {"prompt": "docs/review/prompts/claude.md", "include": SOURCE_GLOBS},
     "chatgpt": {
         "prompt": "docs/review/prompts/chatgpt.md",
@@ -47,7 +45,9 @@ PROFILES = {
             "src/Arb.Core/MarketData/PriceLevel.cs", "src/Arb.Core/MarketData/BookView.cs",
             "src/Arb.Core/Instruments/*.cs", "src/Arb.Core/Pricing/*.cs", "src/Arb.Core/Risk/*.cs", "src/Arb.Core/Inventory/*.cs",
             "src/Arb.Core/Execution/RepairPlanner.cs", "src/Arb.Core/Execution/TradeGroup.cs", "src/Arb.Core/Execution/OrderIntent.cs",
+            "src/Arb.Core/Execution/TradeStateMachine.cs", "src/Arb.Core/Execution/TradeState.cs",
             "tests/Arb.Core.Tests/TestSupport/*.cs", "tests/Arb.Core.Tests/Pricing/*.cs", "tests/Arb.Core.Tests/Risk/*.cs",
+            "tests/Arb.Core.Tests/Regression/*.cs", "docs/review/stage1/REGRESSION_LOG.md",
             "tests/Arb.Core.Tests/Instruments/*.cs", "tests/Arb.Core.Tests/Inventory/*.cs",
             "tests/Arb.Core.Tests/Execution/RepairPlannerTests.cs",
         ],

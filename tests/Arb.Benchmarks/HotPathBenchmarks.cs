@@ -180,12 +180,12 @@ public class RiskBenchmarks
     [Benchmark(Description = "InventoryLedger reserve→terminal→settle (pair)")]
     public int LedgerCycle()
     {
-        _event++;
+        _event += 2;
         _ledger.TryReservePair(_slotUsdt, 600m, _slotBtc, 0.01m, out ReservationHandle a, out ReservationHandle b);
         _ledger.MarkTerminal(a, _event, 0);
         _ledger.MarkTerminal(b, _event, 0);
-        _ledger.OnBalance(_slotUsdt, 100_000m, _event);
-        _ledger.OnBalance(_slotBtc, 10m, _event);
+        _ledger.OnBalance(_slotUsdt, 100_000m, _event + 1); // strictly later balance settles (R-06)
+        _ledger.OnBalance(_slotBtc, 10m, _event + 1);
         return _ledger.ActiveReservations;
     }
 }
@@ -200,7 +200,7 @@ public class ParsingBenchmarks
     [GlobalSetup]
     public void Setup()
     {
-        _ids = new SnowflakeIdGenerator(1, SystemClock.Instance);
+        _ids = new SnowflakeIdGenerator(1, SystemClock.Instance, resumeAfterUnixMs: 0);
         _f = new BenchFixtures();
     }
 

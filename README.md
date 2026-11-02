@@ -5,9 +5,10 @@ Multi-Strategy Crypto Arbitrage Engine (Spatial + Funding Rate) — .NET 8 + Pos
 ## Status
 | Tahap | Isi | Dokumen |
 |---|---|---|
-| 0 | Blueprint + skema PostgreSQL (6 migrasi, 95 assertion) | `docs/ARCHITECTURE.md` |
-| **1** | **`Arb.Core`: pricing, order book seqlock, state machine, risk, inventory (150 test, 0 B/op hot path)** | **`docs/STAGE1_CORE.md`** |
-| 2 | Adapter venue (Bitget/Bybit/Binance) — menunggu keputusan venue/region (STAGE1_CORE §5) | — |
+| 0 | Blueprint + skema PostgreSQL (8 migrasi, 124 assertion; V007/V008 = fix review) | `docs/ARCHITECTURE.md` |
+| 1 ✅ | `Arb.Core`: pricing, order book seqlock, state machine, risk, inventory (323 test, 0 B/op hot path). Review 4 ronde: 33 laporan (Claude-R 20, ChatGPT 10 termasuk 4 duplikat, builder 3), semua S1/S2 di-fix dengan regression merah→hijau. **DITUTUP 2026-11-02 (persetujuan Jansen setelah recheck menyeluruh)** | `docs/STAGE1_CORE.md`, `docs/review/FINDINGS_LOG.md`, `docs/review/stage1/REGRESSION_LOG.md` |
+| **S0** | **Probe latency Tokyo/Singapura → pilih pasangan venue (sekarang)** | `docs/STAGE1_CORE.md` §5 |
+| 2 | Adapter venue (Bitget/Bybit/Binance) — menunggu hasil S0; wajib membuktikan kewajiban I-1…I-3 (STAGE1_CORE §6.1) | — |
 
 ## Struktur
 ```
@@ -22,9 +23,9 @@ docs/                        ARCHITECTURE.md, STAGE1_CORE.md
 ```
 
 ## Tim & review
-Alur kerja tim (Jansen, Claude, ChatGPT, Gemini): `docs/TEAM_WORKFLOW.md`. Paket review satu-file per reviewer:
+Alur kerja tim (Jansen, Claude, ChatGPT; Gemini keluar 2026-10-27): `docs/TEAM_WORKFLOW.md`. Claude dan ChatGPT membaca repo
+langsung; review dilakukan sebagai komentar di PR. Paket review satu-file hanya cadangan:
 ```bash
-python3 tools/make_review_packet.py --profile gemini  --stage "Tahap 1 (Arb.Core)"   # → review_packets/
 python3 tools/make_review_packet.py --profile chatgpt --stage "Tahap 1 (Arb.Core)"
 ```
 Temuan dicatat di `docs/review/FINDINGS_LOG.md`.

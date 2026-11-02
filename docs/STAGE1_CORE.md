@@ -1,4 +1,40 @@
-# Tahap 1 — `Arb.Core` (v0.2)
+# Tahap 1 — `Arb.Core` (v0.3)
+
+> **Status: DITUTUP 2026-11-02 (persetujuan Jansen setelah recheck menyeluruh).** Review 4 ronde (Claude-R, ChatGPT ×3) + recheck builder; kewajiban integrasi yang dibawa ke
+> Tahap 2+ ada di §6.1. v0.3 = patch untuk 20 temuan review ronde 1 (Claude-R). Setiap patch didahului
+> regression test yang terbukti merah di kode lama ([`review/stage1/REGRESSION_LOG.md`](review/stage1/REGRESSION_LOG.md)).
+> Klaim v0.2 yang dibantah review dikoreksi di bawah dan ditandai **(R-xx)**. Triase lengkap ada di
+> [`review/FINDINGS_LOG.md`](review/FINDINGS_LOG.md).
+
+## 0. Perubahan v0.3 (ringkas)
+| Temuan | Perubahan | Kewajiban host (Tahap 2+) |
+|---|---|---|
+| R-01 | `CrossAccountMargin` + `MarginGuard.EvaluateAccount`: jarak likuidasi **per akun cross** | akun cross → `EvaluateAccount`; per posisi hanya isolated / 1 posisi |
+| R-02 | hedge perp residual spatial = `POSITION_OPEN → EXITING → CLOSED`; `TradeGroup` melacak posisi perp per instrumen | `ApplyFill(instrument, …)`; tulis `repair_method = PERP_HEDGE` |
+| R-03 | limit IOC / VWAP / edge memakai haircut yang sama dengan Q* | – |
+| R-04 | `MarkInvalid` / `MarkResyncing` = request flag dari thread mana pun, tidak menulis versi seqlock | – |
+| R-05 | **REJECTED berdasarkan data** (disassembly JIT ARM64 di CI): tidak ada lowering `staddl`/`xzr` | jalankan job `seqlock-arm64` saat upgrade runtime |
+| R-06 | rilis reservasi hanya oleh saldo *strictly later*; timeout → `FlagUnsettled` (bukan rilis) | `NeedsReconcile` → rekonsiliasi REST → `OnBalance` |
+| R-07 | `BookTooOld` (spatial 1 s, funding 5 s), `PairSkew`, latency negatif = `ClockUncertain` | `FreshnessLimits.From(limits, strategy)` |
+| R-08 | `GridGeneration` di spec & book; book dari grid lain tidak di-price | snapshot ulang dengan generasi baru setelah perubahan tick/step |
+| R-09 | `NetworkId` 0 = tak terpetakan, tidak pernah membentuk route | alert bila `Update` mengembalikan > 0 |
+| R-10 | transisi `POSITION_OPEN→RESIDUAL/STUCK`, `EXITING→POSITION_OPEN` (C# + SQL) | – |
+| R-11 | cap inventory non-replenishable **kumulatif** sejak route tutup (`RouteBudgetTracker`) | `Observe` tiap evaluasi, `RecordUse` setelah fill |
+| R-12 | route quote tertutup + `ReferencePx` tidak valid → `RejectSanity` | – |
+| R-13 | repair BUY dengan fee base di-gross-up | isi `RepairCandidate.FeeAsset` dari `FeeModel` |
+| R-14 | satu definisi flat: delta = dust yang **diterima eksplisit** (`AcceptResidualAsDust`), sama di SQL | tulis `dust_accepted_base` |
+| R-15 | quote reject: nilai tak dihitung = NaN (→ NULL); kolom eksekusi nullable kecuali EXECUTE | NaN/0-level → NULL saat COPY |
+| R-16 | `ExpectedCashQuote` (basis capture ratio), funding di `TradeGroup`, `v_rebalance_cost_daily` | tulis `exp_slippage_buffer_quote`, `exp_rebalance_quote` |
+| R-17 | Snowflake wajib `resumeAfterUnixMs` (high-water mark) | journal `LastIssuedUnixMs`; resume = max(journal, DB) + margin |
+| R-18 | gate funding & `RiskLimits.Validate` menolak NaN/∞ | – |
+| R-19 | dust dinilai di venue tempat ia berada (bid beli / ask jual) | – |
+| R-20 | kontrak semua enum ↔ SQL, brute force Q* dengan hurdle/cap/haircut, komentar SQL dibuang | – |
+| C-07 | dua observasi saldo di ms yang sama tanpa urutan → `Conflict`: simpan nilai **terkecil** + `NeedsReconcile`; stream user dengan nomor urut kirim diurutkan dalam 1 ms | stream: `OnBalance(slot, free, ms, seq)` (seq naik per slot, 1 sumber per slot). ~~REST: stamp batas bawah~~ **salah, dikoreksi C-09** |
+| C-09 | observasi saldo = **interval** as-of; saldo hanya naik dari observasi yang pasti lebih baru (batas bawahnya > batas atas semua yang dipegang slot); interval tumpang-tindih → `Conflict` (nilai terkecil); observasi tanpa urutan (walau nilainya sama) mengakhiri urutan dalam 1 ms | REST tanpa as-of exact: `OnBalanceSnapshot(slot, free, notBefore, notAfter)` = [request dikirim − lag cache venue, waktu respons], keduanya waktu venue; as-of exact: `OnBalance(slot, free, ms)`; **jangan** stamp batas bawah lewat API titik |
+| C-10 | setiap transisi ke `POSITION_OPEN` (semua strategi: entry, hedge repair, kembali dari partial exit) wajib delta-netral: `|delta − dust| ≤ MaxHoldingDeltaCanon` dari fill aktual, kode `UnhedgedDelta`; toleransi per trade di `Initialize`, overload lama = 0 (fail-closed) | `Initialize(…, TradeGroup.HoldingDeltaTolerance(limits.MaxHoldingDeltaQuote, px))`; `UnhedgedDelta` → tetap `EXITING` atau `RESIDUAL`. SQL hanya menjaga lifecycle/label, bukan eksposur |
+| C-08 | hedge spatial yang di-unwind **sebagian** di kedua kaki kembali `EXITING → POSITION_OPEN` (C# + `V008`); entry `IN_FLIGHT → POSITION_OPEN` tetap ditolak | partial unwind: isi kedua kaki dulu, lalu `TransitionTo(PositionOpen)`; bila perp sudah habis tetapi spot tersisa → `RESIDUAL` (`NotHedged`) |
+| C-02 | kaki final (setelah gross-up fee-base & pembulatan lot) dicek ulang terhadap **semua** cap secara exact (notional, qty kedua kaki, level, kedalaman haircut); bila melanggar → ukuran common terbesar yang muat (binary search), atau reject | – |
+| C-01 | `FixedPoint.ToUnits`: snap = 1e-9 + 16 ulp, maksimum 1e-6 unit; tidak pernah menyeberangi integer | – |
 
 Pure domain library: **zero dependency eksternal, tanpa I/O, deterministik**. Semua kalkulasi & state
 yang menentukan "masuk / tidak / bagaimana memperbaiki" ada di sini dan diuji tanpa API key.
@@ -38,12 +74,12 @@ Belum ada di Tahap 1 (sengaja, didesain bersama adapter di Tahap 2): interface v
 
 ```bash
 dotnet build ArbEngine.sln -c Release          # src/: TreatWarningsAsErrors
-dotnet test  tests/Arb.Core.Tests -c Release   # 150 test case
+dotnet test  tests/Arb.Core.Tests -c Release   # 250 test case (v0.3)
 dotnet run   -c Release --project tests/Arb.Benchmarks -- --filter '*'
 # acceptance: kolom "Allocated" = "-" untuk semua benchmark
 ```
-Test kontrak SQL membaca `db/migrations/V002__trading.sql` (dicari ke atas dari folder output;
-override dengan env `ARB_REPO_ROOT`).
+Test kontrak SQL membaca **semua** `db/migrations/V*.sql` (dicari ke atas dari folder output; override dengan env
+`ARB_REPO_ROOT`), dengan komentar SQL dibuang lebih dulu.
 
 ---
 
@@ -57,8 +93,16 @@ override dengan env `ARB_REPO_ROOT`).
 | Saldo, eksposur dari fill, reservasi | `decimal` | exact terhadap angka venue; bukan jalur per-tick |
 
 Setiap konversi kembali ke grid venue memakai arah pembulatan **eksplisit** (`Rounding.Down/Up`).
-Temuan saat verifikasi: `6005000 × 0.999` dalam `double` bisa jatuh 1 tick di bawah. Limit price repair
-sekarang dihitung dengan `decimal`, dan `FixedPoint.ToUnits` memakai toleransi relatif (1e-12·|x|).
+Temuan saat verifikasi: konversi double ke grid bisa jatuh tepat di bawah titik grid (contoh nyata: `0,01 / 0,00001` =
+999,9999999999999; `517,0694639999999 / 1e-6` = 517069463,99999994). Limit price repair sekarang dihitung dengan `decimal`.
+(Koreksi C-01: versi lama teks ini menyebut `6005000 × 0,999` sebagai contoh; hasil itu justru exact 5998995,0 dalam
+`double`, jadi contohnya salah.) v0.3 memakai toleransi relatif (1e-12·|x|).
+
+**Koreksi (C-01, review ChatGPT):** toleransi relatif 1e-12·|x| itu sendiri salah: di |x| ≈ 1e12 ia mencapai satu unit
+penuh, sehingga `Down` menaikkan integer exact (1e12 → 1e12 + 1) dan `Up` menurunkannya. v0.3+: toleransi = 1e-9 + 16 ulp
+dari x, **dibatasi 1e-6 unit** (`MaxGridSnap`), jadi snap tidak pernah menyeberangi integer dan integer exact tetap di
+semua magnitudo. Di atas ~1e9 unit noise bisa melebihi batas itu; hasilnya `Down` kurang satu unit / `Up` lebih satu unit,
+keduanya arah aman. Field order dan cap keras dicek ulang secara exact oleh pemanggil (C-02).
 
 ### 3.2 OrderBookL2 + seqlock
 - Writer: `Interlocked.Increment` (ganjil, full fence) → mutasi → `Volatile.Write` (genap, release).
@@ -68,18 +112,24 @@ sekarang dihitung dengan `decimal`, dan `FixedPoint.ToUnits` memakai toleransi r
 - Satu seksi seqlock per pesan venue → reader tidak pernah melihat setengah pesan.
 - Crossed book / qty negatif / harga ≤ 0 → `Invalid` sampai snapshot baru.
 - **Sifat seqlock:** writer yang tidak pernah jeda membuat reader kelaparan (`TryCopyTo` → false). Di engine itu berarti "evaluasi ulang pada dirty signal berikutnya", bukan error.
+- **(R-04)** Hanya thread writer yang menulis versi. `MarkInvalid`/`MarkResyncing` dari thread lain (watchdog, timer, operator) menaikkan *request flag*: reader langsung melihat Invalid/Resyncing, `ApplyDelta` menolak, `ApplySnapshot` mengonsumsinya. `EndWrite` memakai nilai ganjil section itu sendiri. Klaim v0.2 "seqlock benar" hanya berlaku untuk single writer.
+- **(R-05)** ARM64: disassembly JIT .NET 8 di runner `ubuntu-24.04-arm` menunjukkan `ldaddal` dengan register tujuan nyata (acquire + release), bukan `staddl`; stress 20/20. Hasil increment wajib tetap dipakai (komentar di `BeginWrite`).
 
 ### 3.3 Q* (CrossedBookOptimizer)
 Marginal net unit ke-q: `m(q) = bid_B(q)(1−f_B−s_B) − ask_A(q)(1+f_A+s_A) − c_unit`, non-increasing.
 NetProfit(Q) = ∫m → concave piecewise-linear → maksimum saat m(q) ≤ hurdle. Cukup satu merge-walk.
 Hurdle `MinMarginalEdgeBps` berlaku **per unit marginal**: level dalam yang menambah eksposur dengan
 edge tipis tidak diambil. Hasil kontinu → floor ke common lot → walk exact ulang → net edge exact.
+**(R-03)** Walk exact ulang memakai haircut yang **sama** dengan Q*: level marginalnya menjadi limit IOC, sehingga IOC
+tetap terisi penuh walau hanya fraksi haircut yang benar-benar tersedia.
 
 ### 3.4 Fee di aset base
 Spot buy tanpa token diskon: fee dipotong dari koin yang **diterima**. Tanpa koreksi, setiap trade
 meninggalkan short `Q·f` di venue jual (inventory drift). `LotNormalizer.GrossUpBuyLots` membeli
 `Q/(1−f)` dibulatkan ke atas → residual selalu ≥ 0 (dust long). `NetEdgeCalculator` menghitung fee
-base **sekali**, sebagai residual × mark (tidak double count).
+base **sekali**, sebagai residual × mark (tidak double count). **(R-19)** Mark = harga di venue tempat residual
+berada: dust long di **bid venue beli**, dust short (fee base di kaki jual) di **ask venue jual**. **(R-13)** Repair BUY
+dengan fee base di-gross-up dengan cara yang sama (`RepairCandidate.FeeAsset`).
 
 ### 3.5 Deposit/withdraw (Tambahan #1) — kenapa TIDAK di `InstrumentSpec`
 Status wallet itu per **(venue, aset, network)** dan berubah dalam hitungan menit (maintenance chain),
@@ -90,7 +140,8 @@ Aturan yang lebih ketat dari sekadar "flag on/off":
 1. **Route** A→B ada hanya jika **satu network yang sama** punya withdraw A ∧ deposit B. Withdraw Bitget hanya TRC20 dan deposit Bybit hanya ERC20 berarti tidak ada route.
 2. Status basi (> `MaxWalletStatusAgeMs`) = `Unknown` = diperlakukan tertutup (fail-safe).
 3. Spot-spot, route tertutup, edge > `WalletClosedMaxEdgeBps` → `REJECT_SANITY` + `SuspectedWalletTrap`. Spread melebar *karena* koin tidak bisa dipindah.
-4. Route tertutup + edge normal → boleh **hanya** dengan inventory yang sudah ada, di-cap `NonReplenishableInventoryFraction` (tidak bisa diisi ulang sampai wallet buka).
+4. Route tertutup + edge normal → boleh **hanya** dengan inventory yang sudah ada: **kumulatif** paling banyak `NonReplenishableInventoryFraction` × inventory saat route tutup (`NonReplenishableBudget`, `RouteBudgetTracker`). v0.2 menghitung fraksi dari sisa per evaluasi → 22 trade menguras 99,8 % **(R-11)**. Budget tidak diberikan → `RejectInventory` (fail-closed). Route quote tertutup tanpa `ReferencePx` valid → `RejectSanity` **(R-12)**.
+6. **(R-09)** Network yang tidak bisa dipetakan adapter (`NetworkId` 0) tidak pernah cocok dengan apa pun dan membuat route `Unknown`, bukan Open.
 5. Ada kaki perp (perp-perp, spot-perp) → status wallet koin diabaikan (sesuai permintaan).
 
 ### 3.6 Distance-to-liquidation (Tambahan #2)
@@ -114,6 +165,14 @@ harga likuidasi hampir tidak bergerak. *Partial reduce hanya efektif di cross ma
 sebaiknya berjalan di cross margin (akun khusus strategi). Entry funding juga di-gate:
 `FundingVerdict.RejectLiquidationDistance` bila jarak awal < `MinEntryLiqDistanceBps`.
 
+**Koreksi (R-01):** rumus di atas (dan `MarginGuard.Evaluate`) adalah **per posisi**. Di akun cross dengan lebih dari satu
+posisi, semua posisi berbagi satu equity; menghitung tiap posisi terhadap seluruh equity terlalu optimistis (contoh: 2 short
+× 3000 USDT, equity 1000 → 3194 bps per posisi, padahal **1545 bps untuk akun = zona Warn**). Untuk akun cross dipakai
+`CrossAccountMargin` / `MarginGuard.EvaluateAccount`: surplus akun di bawah guncangan adverse seragam pada semua kaki
+(tier pada notional tergoncang), `CollateralToReach` exact, `KeepFractionToReach` (reduce pro-rata, fee reduce ikut
+dihitung). Zona & aksi sama; `ReduceFraction` berlaku untuk setiap pair. Gate entry funding harus memakai jarak akun
+**setelah** posisi baru ditambahkan.
+
 ### 3.7 Slippage per kaki = f(latency kaki itu)
 `horizon = umur data + latency order one-way` → `σ·√horizon`. Konsekuensinya: kaki venue yang jauh
 otomatis mendapat buffer lebih besar. Test `SlowLeg_GetsLargerSlippageBuffer_AndCanKillTheTrade`
@@ -126,11 +185,59 @@ ladder (10/30/80 bps), tidak pernah market order murni.
 `MaxStopLossBps` **tidak memblok** flatten: membiarkan residual terbuka = taruhan arah tanpa hedge.
 Ia hanya mem-flag (→ breaker), dan `SevereLossBps` → HALT_GLOBAL.
 
+**(R-02)** Repair `PerpHedge` membuat delta 0 tetapi **dua posisi terbuka** (spot + perp). Trade tidak boleh terminal:
+`REPAIRING → POSITION_OPEN → EXITING → CLOSED`, dan `TradeGroup` menolak COMPLETED/REPAIRED/CLOSED selama ada perp
+terbuka. **(R-14)** Satu definisi flat: residual yang di bawah minimum venue (atau ≤ `DustCanon`) harus **diterima
+eksplisit** (`AcceptResidualAsDust`, disimpan sebagai `dust_accepted_base`) sebelum state terminal; DB memakai aturan yang
+sama. `RepairPlan.DustQuote` = nilai yang di-write-off (alert di atas `dust_quote`). **(R-10)** Saat posisi ditahan:
+likuidasi/ADL satu kaki → `RESIDUAL`, venue down → `STUCK`, partial reduce → `EXITING → POSITION_OPEN`.
+
 ### 3.9 InventoryLedger
-`Available = venueFree − reserved`. Reservasi dilepas saat order terminal **dan** ada balance event
-dengan waktu ≥ terminal. Selama IOC berjalan bisa terjadi double count, tapi ke arah aman: available
-bisa *understated*, tidak pernah *overstated*. `TryReservePair` atomik sehingga dua peluang tidak pernah
-memakai saldo yang sama. `ExpireSettled` sebagai jaring pengaman (diikuti rekonsiliasi REST).
+`Available = venueFree − reserved`. Reservasi dilepas saat order terminal **dan** ada balance event dengan waktu
+**sesudah** (strict) terminal. Selama IOC berjalan bisa terjadi double count, tapi ke arah aman. `TryReservePair`
+atomik sehingga dua peluang tidak pernah memakai saldo yang sama.
+
+**Koreksi (R-06):** klaim v0.2 "tidak pernah overstated" **salah**: `ExpireSettled` melepas reservasi yang fill-nya belum
+tercermin, dan event saldo di milidetik yang sama dengan fill (layanan venue yang berbeda) juga melepasnya (Available 0,05
+padahal 0,02 BTC). v0.3: rilis hanya oleh event *strictly later*; timeout memanggil `FlagUnsettled` → slot
+`NeedsReconcile` → rekonsiliasi REST (waktu server venue) masuk lewat `OnBalance`. Tidak pernah dilepas karena waktu.
+
+**Koreksi (C-07, review ChatGPT):** v0.3 masih bisa overstate. Stamp milidetik tidak mengurutkan dua observasi dari ms
+yang sama: snapshot REST yang terlambat (100) bisa menimpa saldo stream yang lebih baru (20) setelah reservasi dilepas,
+lalu reservasi 80 berhasil. Fix: `OnBalance` mengembalikan `BalanceUpdate` (`Applied / Duplicate / Stale / Conflict`).
+Observasi tanpa nomor urut (REST, koneksi kedua) diurutkan hanya oleh waktu venue; di ms yang sama dengan nilai berbeda
+→ `Conflict` → simpan nilai terkecil (salah satu dari keduanya adalah nilai terbaru, jadi yang terkecil tidak bisa
+overstate) dan tandai `NeedsReconcile`; observasi *strictly later* berikutnya menyelesaikannya. Satu stream user per slot
+memberi nomor urut kirim (`OnBalance(slot, free, ms, seq)`), sehingga beberapa fill dalam 1 ms tidak memicu rekonsiliasi
+palsu. Seq yang tidak naik → diperlakukan tanpa urutan; waktu venue mundur di stream berurut → `Conflict` (bukan dibuang,
+karena event yang dibuang bisa berupa debit). Klaim "tidak pernah overstate" berlaku **di bawah kontrak host** (§0 C-07)
+dan diuji dengan model acak (3.000 riwayat, invariant `Available ≤ F(P) − Σ fill kita sesudah P`, P = observasi terbaru
+secara kausal yang sudah diterima). Yang belum terbukti: lag cache REST per venue (NEEDS-DATA, ukur di Tahap 2).
+
+**Koreksi (C-09, re-review ChatGPT):** kontrak host C-07 "bila venue tidak memberi as-of, stamp batas bawah; lebih awal =
+lebih aman" **salah**. Snapshot berstamp batas bawah kalah dari event stream yang sebenarnya *lebih lama* tetapi
+bertimestamp di antara batas bawah dan as-of asli: 100 @1000 → snapshot 20 (dibaca 1010, stamp 1001) → event tertunda
+100 @1005 menimpa → Available 100. Fix: setiap observasi adalah interval as-of; stream event dan snapshot as-of exact =
+titik; snapshot REST = `[request dikirim − lag cache, waktu respons]` lewat `OnBalanceSnapshot`. Saldo hanya **naik** dari
+observasi yang pasti lebih baru daripada semua yang dipegang slot (batas bawahnya > batas atas mereka, atau event
+berikutnya dari stream berurut); observasi yang tumpang-tindih → `Conflict` dengan nilai terkecil dan intervalnya
+digabung; observasi yang pasti lebih lama → `Stale`. Rilis reservasi: fill harus *strictly* sebelum batas bawah observasi
+yang diterapkan, atau sebelum batas bawah terbesar yang dipegang slot (`MarkTerminal`). Saat mengerjakan C-09 ditemukan juga
+lubang di fix C-07 sendiri (as-of exact): duplikat tanpa urutan tidak mengakhiri urutan dalam 1 ms, sehingga event stream
+lama sesudahnya diterapkan (26 → 31). Model acak kini memuat stream tertunda dan snapshot berinterval (2 × 3.000 riwayat)
+plus model exact 5.000 riwayat.
+
+### 3.10 Kesegaran data (R-07), grid spec (R-08), ID (R-17), persistensi (R-15, R-16)
+- `StaleDataGuard`: selain silence generik, **umur maks per strategi** (`BookTooOld`: spatial 1000 ms, funding 5000 ms) dan
+  **skew terima antar-book** (`PairSkew`: 500 / 2000 ms). Latency negatif melebihi ketidakpastian jam + 1 ms resolusi
+  timestamp venue = `ClockUncertain` (offset salah). `FreshnessLimits.From(limits)` = batas spatial (paling ketat).
+- Perubahan tick/step lewat `Replace` menaikkan `InstrumentSpec.GridGeneration`; book membawa generasi grid saat
+  di-parse (`ApplySnapshot(…, gridGeneration)`); pricer & repair menolak book dari generasi lain.
+- `SnowflakeIdGenerator(node, clock, resumeAfterUnixMs)`: semua ID punya ms > titik resume walau jam mundur setelah
+  restart; host men-journal `LastIssuedUnixMs`.
+- `SpatialQuote`: nilai yang tidak dihitung = NaN → NULL (`HasExecutionPricing`); `EdgeBreakdown.ExpectedCashQuote`
+  (= net + buffer slippage + rebalance) adalah basis capture ratio; `TradeGroup.ApplyFunding` menyamakan model kas
+  dengan `v_trade_ledger`.
 
 ---
 
@@ -142,7 +249,12 @@ memakai saldo yang sama. `ExpireSettled` sebagai jaring pengaman (diikuti rekons
 > 2. Source test & benchmark **asli** di-compile apa adanya terhadap shim yang meniru signature xunit 2.9 / BDN 0.14 yang dipakai, lalu dijalankan dengan runner reflection.
 > 3. **Konfirmasi final tetap `dotnet test` / `dotnet run` asli di mesin Anda.** Risiko residual: perbedaan kecil overload/analyzer xUnit (test project tidak memakai warnings-as-errors agar warning analyzer tidak memblok).
 
-### 4.1 Test: 150/150 lulus (Debug ×5, Release ×5, stabil)
+### 4.0 v0.3: 250/250 lulus (harness offline) + CI xUnit asli
+v0.3 menambah 100 test: regression test per temuan di `tests/Arb.Core.Tests/Regression/` (R01…R20), dan test lama yang
+API-nya berubah disesuaikan (lihat `review/stage1/REGRESSION_LOG.md`). DB: `db/tests/test_schema.sql` + blok
+`REGRESSION v0.3` (di-rollback), `ALL TESTS PASSED`. Tabel 4.1 di bawah adalah baseline v0.2.
+
+### 4.1 Test v0.2: 150/150 lulus (Debug ×5, Release ×5, stabil)
 | Kelas | Case | Kelas | Case |
 |---|---:|---|---:|
 | FixedPointTests | 31 | RepairPlannerTests | 9 |
@@ -172,13 +284,32 @@ Beberapa sengaja identik dengan skenario `db/tests` (opp 501, trade 1001/1002) s
 | M7 multiplier diabaikan di harga canonical | 1000PEPE ×5 |
 | M8 hurdle diabaikan | Optimizer hurdle |
 
+v0.3 (R-20): empat mutan optimizer tambahan (hurdle diabaikan, haircut diabaikan, cap notional dihitung pakai bid,
+cap level +1) **lolos** brute-force test v0.2 dan **tertangkap** `R20_OptimizerBruteForceTests`; mutasi tabel transisi lewat
+komentar SQL dan mutasi CHECK enum tertangkap test kontrak baru.
+
 **RCA flaky test yang ditemukan dan diperbaiki:** versi awal test seqlock (loop jumlah pesan tetap) sesekali
 gagal di syarat "≥100 read tervalidasi". Stress 600 ronde: **0 torn read**. Penyebabnya bukan seqlock:
 writer selesai sebelum thread reader terjadwal, ditambah reader kelaparan oleh writer tanpa jeda (5% ronde
 gagal, 39% di bawah tekanan GC). Test diubah ke berbasis durasi + start barrier + jeda writer realistis.
 Stress ulang: 124 juta read tervalidasi, minimum 173 ribu per ronde, 0 torn.
 
-### 4.3 Alokasi & latency (harness offline, container 2 vCPU, .NET 8.0.132)
+### 4.3a v0.3 vs v0.2, A/B berurutan di container yang sama (min dari 2 run, ns/op)
+Container ini berisik: `CrossedBookOptimizer` (kode **tidak berubah**) terukur 246 vs 411 ns di dua build. Angka
+ini hanya untuk melihat regresi besar; **semua benchmark 0 B/op** (yang ini exact).
+
+| Benchmark | v0.2 | v0.3 | Catatan |
+|---|---:|---:|---|
+| OrderBookL2.ApplyDelta | 182 | 180 | + cek request flag (R-04) |
+| OrderBookL2.TryCopyTo | 57 | 50 | |
+| SpatialArbPricer.Evaluate | 661 | 550 | walk dengan haircut (R-03) memakai aritmetika 64-bit |
+| RepairPlanner.Plan | 186 | 193 | |
+| SanityGuard.Evaluate | 25 | 33 | cek budget/ref px (R-11/R-12) |
+| StaleDataGuard.Check | 7 | 9 | cek umur & latency negatif (R-07) |
+| InventoryLedger cycle | 595 | 865 | benchmark diperbaiki: saldo strictly later (R-06); dalam rentang noise |
+| MarginGuard.EvaluateAccount | – | (zero-alloc test) | bisection, bukan hot path per tick |
+
+### 4.3 Alokasi & latency v0.2 (harness offline, container 2 vCPU, .NET 8.0.132)
 | Benchmark | ns/op (median, indikatif) | B/op |
 |---|---:|---:|
 | OrderBookL2.ApplyDelta (10 level, book 200) | 123 | 0 |
@@ -221,8 +352,28 @@ wire→decision (< 50 µs) aman dengan margin dua orde. Hot path tetap jauh lebi
 ---
 
 ## 6. Masukan untuk Tahap 2
+- **v0.3:** kewajiban host per temuan ada di tabel §0 (kolom "Kewajiban host").
 - Adapter perlu memetakan nama network venue → `NetworkId` canonical (ERC20/ETH/…).
 - `BookStamp.ExchangeUnixMicros` wajib dari timestamp venue, `LocalRecvUnixMicros` dari jam host ber-chrony.
 - `ClockOffsetEstimator` (Venues.Common) menghasilkan `VenueClock` untuk `StaleDataGuard`.
-- Synchronizer snapshot/delta memanggil `MarkInvalid(SequenceGap)` → `ApplySnapshot` (Bitget: CRC32 via `CopyTopFromWriterThread`).
+- Synchronizer snapshot/delta memanggil `MarkInvalid(SequenceGap)` → `ApplySnapshot(…, spec.GridGeneration)` (Bitget: CRC32 via `CopyTopFromWriterThread`). `MarkInvalid` boleh dari thread mana pun (R-04).
 - `InventoryLedger.OnBalance` butuh event time venue (Binance `u`, Bybit `creationTime`, Bitget `ts`).
+
+### 6.1 Kewajiban integrasi dari review Tahap 1 (wajib dibuktikan sebelum live)
+Dikumpulkan dari catatan reviewer ronde 1–3 (ChatGPT `5732047500`, `5732656006`, `5732867198`). Bukan bug Core yang
+terbuka; ini batas yang tidak bisa dibuktikan oleh test Core dan harus punya test integrasi / replay di tahap yang disebut.
+
+| # | Asal | Kewajiban | Tahap | Bukti yang diminta |
+|---|---|---|---|---|
+| I-1 | C-09 | bounds snapshot `[notBefore, notAfter]` benar-benar mengurung as-of: lag cache **maksimum** (bukan rata-rata), ketidakpastian jam, resolusi timestamp venue | 2 | pengukuran per venue + replay; bila bounds tidak diketahui → saldo itu **tidak** dipakai untuk entry |
+| I-2 | C-07/C-09 | urutan stream saldo venue benar-benar kausal; counter terima lokal hanya membuktikan urutan terima satu koneksi | 2 | rekaman WS asli + replay; satu sumber berurut per slot |
+| I-3 | C-09 | API titik `OnBalance(slot, free, ms)` hanya untuk as-of exact; batas bawah lewat API titik = salah pakai yang tidak terdeteksi Core | 2 | review kode adapter + test adapter |
+| I-4 | C-10 | executor selalu lewat `TradeGroup.TransitionTo` (bukan tabel state machine saja); `UnhedgedDelta` → repair/residual | 3 | test executor end-to-end |
+| I-5 | C-10 | toleransi holding per trade dipulihkan identik setelah restart (kini belum ada kolom DB-nya) | 3–4 | kolom persistence + test recovery |
+| I-6 | C-10 | guard holding hanya saat transisi: late fill, ADL, likuidasi, dan perubahan harga saat holding perlu monitor kontinu (budget quote dihitung pada `referencePx` saat entry) | 3–4 | monitor + chaos test |
+| I-7 | C-10 | dust yang diterima punya budget sendiri, terpisah dari toleransi holding | 3 | config + alert |
+| I-8 | R-01 | semua posisi cross masuk `EvaluateAccount`; collateral lokal dari luar equity yang sudah dihitung; fill aktual kedua kaki divalidasi ulang | 3 | test integrasi margin |
+| I-9 | R-02 / C-10 | recovery memuat gross exposure perp + order/fill rekonsiliasi, bukan hanya net delta / status terminal | 4 | test recovery testnet |
+| I-10 | C-02 | cap notional = sebelum fee quote; dana IOC total (termasuk fee) dicek terpisah oleh gate inventory | 3 | test executor |
+| I-11 | R-05 | job `seqlock-arm64` dijalankan ulang saat upgrade runtime .NET | 7 | log CI |
+

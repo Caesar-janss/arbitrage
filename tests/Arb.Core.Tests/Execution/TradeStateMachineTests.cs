@@ -10,18 +10,27 @@ public class TradeStateMachineTests
 {
     private const string TradingMigration = "db/migrations/V002__trading.sql";
 
+    /// <summary>Effective table = every INSERT into trd.trade_state_transition across ALL migrations (V002 + V007 …).</summary>
     [Fact]
-    public void TransitionTable_IsIdenticalToSqlMigration()
+    public void TransitionTable_IsIdenticalToSqlMigrations()
     {
-        string sql = RepoFiles.ReadAll(TradingMigration);
-        Match block = Regex.Match(sql, @"INSERT INTO trd\.trade_state_transition[^;]*;", RegexOptions.Singleline);
-        Assert.True(block.Success, "transition INSERT not found in migration");
-
         var fromSql = new HashSet<(string, string)>();
-        foreach (Match m in Regex.Matches(block.Value, @"\('([A-Z_]+)',\s*'([A-Z_]+)'\)"))
+        int blocks = 0;
+        foreach (string file in RepoFiles.Migrations())
         {
-            fromSql.Add((m.Groups[1].Value, m.Groups[2].Value));
+            string sql = StripSqlComments(File.ReadAllText(file)); // a commented-out row must not count
+            Assert.False(Regex.IsMatch(sql, @"DELETE\s+FROM\s+trd\.trade_state_transition", RegexOptions.IgnoreCase), $"{file}: DELETE not modelled by this test");
+            foreach (Match block in Regex.Matches(sql, @"INSERT INTO trd\.trade_state_transition[^;]*;", RegexOptions.Singleline))
+            {
+                blocks++;
+                foreach (Match m in Regex.Matches(block.Value, @"\('([A-Z_]+)',\s*'([A-Z_]+)'\)"))
+                {
+                    Assert.True(fromSql.Add((m.Groups[1].Value, m.Groups[2].Value)), $"duplicate transition {m.Value}");
+                }
+            }
         }
+
+        Assert.True(blocks >= 2, "expected transition INSERTs in V002 and V007");
 
         var fromCode = new HashSet<(string, string)>();
         foreach ((TradeState f, TradeState t) in TradeStateMachine.Transitions)
@@ -29,14 +38,15 @@ public class TradeStateMachineTests
             fromCode.Add((f.ToDbCode(), t.ToDbCode()));
         }
 
-        Assert.Equal(20, fromSql.Count);
+        Assert.Equal(23, fromSql.Count);
+        Assert.Equal(23, TradeStateMachine.Transitions.Length);
         Assert.True(fromSql.SetEquals(fromCode), "C# TradeStateMachine and trd.trade_state_transition diverged");
     }
 
     [Fact]
     public void StatesAndTerminalFlags_AreIdenticalToSql()
     {
-        string sql = RepoFiles.ReadAll(TradingMigration);
+        string sql = StripSqlComments(RepoFiles.ReadAll(TradingMigration));
         Match block = Regex.Match(sql, @"INSERT INTO trd\.trade_state \(state, is_terminal, description\) VALUES[^;]*;", RegexOptions.Singleline);
         Assert.True(block.Success, "trade_state INSERT not found");
         int n = 0;
@@ -128,6 +138,8 @@ public class TradeStateMachineTests
         Assert.True(r.State.IsTerminal());
         Assert.False(TradeState.Stuck.IsTerminal());
     }
+
+    internal static string StripSqlComments(string sql) => Regex.Replace(sql, @"--[^\n]*", string.Empty);
 }
 
 public class DbContractTests
@@ -135,7 +147,7 @@ public class DbContractTests
     [Fact]
     public void RejectReasons_MatchOpportunityDecisionCheck()
     {
-        string sql = RepoFiles.ReadAll("db/migrations/V002__trading.sql");
+        string sql = TradeStateMachineTests.StripSqlComments(RepoFiles.ReadAll("db/migrations/V002__trading.sql"));
         Match m = Regex.Match(sql, @"decision\s+text\s+NOT NULL CHECK \(decision IN \(([^)]*)\)\)", RegexOptions.Singleline);
         Assert.True(m.Success, "decision CHECK not found");
         var fromSql = new HashSet<string>();
@@ -156,7 +168,7 @@ public class DbContractTests
     [Fact]
     public void StrategyCodes_MatchSchema()
     {
-        string sql = RepoFiles.ReadAll("db/migrations/V002__trading.sql");
+        string sql = TradeStateMachineTests.StripSqlComments(RepoFiles.ReadAll("db/migrations/V002__trading.sql"));
         Match m = Regex.Match(sql, @"strategy\s+text\s+NOT NULL CHECK \(strategy IN \(([^)]*)\)\)");
         Assert.True(m.Success, "strategy CHECK not found");
         var fromSql = new HashSet<string>();

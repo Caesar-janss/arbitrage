@@ -41,6 +41,9 @@ public sealed class BookView
 
     public bool IsTruncated { get; private set; }
 
+    /// <summary>Grid generation of the instrument spec the levels were parsed with (must equal the spec's, R-08).</summary>
+    public int GridGeneration { get; private set; }
+
     /// <summary>Bids best (highest) first.</summary>
     public ReadOnlySpan<PriceLevel> Bids => new(_bids, 0, BidCount);
 
@@ -62,7 +65,8 @@ public sealed class BookView
         ReadOnlySpan<PriceLevel> bidsBestFirst,
         ReadOnlySpan<PriceLevel> asksBestFirst,
         in BookStamp stamp,
-        BookHealth health = BookHealth.Synced)
+        BookHealth health = BookHealth.Synced,
+        int gridGeneration = 0)
     {
         if (bidsBestFirst.Length > Capacity || asksBestFirst.Length > Capacity)
         {
@@ -71,7 +75,7 @@ public sealed class BookView
 
         bidsBestFirst.CopyTo(_bids);
         asksBestFirst.CopyTo(_asks);
-        Commit(instrument, bidsBestFirst.Length, asksBestFirst.Length, stamp, health, BookFault.None, 0, false);
+        Commit(instrument, bidsBestFirst.Length, asksBestFirst.Length, stamp, health, BookFault.None, 0, false, gridGeneration);
     }
 
     internal void Commit(
@@ -82,7 +86,8 @@ public sealed class BookView
         BookHealth health,
         BookFault fault,
         long version,
-        bool truncated)
+        bool truncated,
+        int gridGeneration)
     {
         Instrument = instrument;
         BidCount = bidCount;
@@ -92,5 +97,6 @@ public sealed class BookView
         Fault = fault;
         Version = version;
         IsTruncated = truncated;
+        GridGeneration = gridGeneration;
     }
 }

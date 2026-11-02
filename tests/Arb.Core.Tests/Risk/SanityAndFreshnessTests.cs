@@ -35,6 +35,8 @@ public class WalletStatusAndSanityTests
         SellVenueBaseInventory = 0.2,
         BuyVenueQuoteInventory = 12_000,
         ReferencePx = 60_000,
+        SellVenueBaseBudget = new NonReplenishableBudget(0.2, 0),   // route just closed: snapshot = current (R-11)
+        BuyVenueQuoteBudget = new NonReplenishableBudget(12_000, 0),
     };
 
     [Fact]

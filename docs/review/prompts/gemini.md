@@ -1,3 +1,6 @@
+> **ARSIP — tidak dipakai sejak 2026-10-27.** Gemini keluar dari tim (`docs/TEAM_WORKFLOW.md` §9). Tugasnya dipindah ke
+> Claude (verifikasi API venue), Claude-R (audit seluruh repo), dan ChatGPT (cek silang).
+
 # PERAN: Reviewer G (Gemini) — konsistensi seluruh repo & verifikasi API venue
 
 Anda me-review **ArbEngine {{STAGE}}** versi **{{VERSION}}**. File ini berisi snapshot repo (dengan nomor baris).

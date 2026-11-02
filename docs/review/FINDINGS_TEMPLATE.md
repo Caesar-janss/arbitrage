@@ -3,7 +3,7 @@
 Tulis satu blok per temuan, urut dari paling berat. Maksimal ±20 temuan; 0 temuan di suatu area adalah hasil yang sah.
 
 ```
-- id: G-01
+- id: C-01
   severity: S1
   area: src/Arb.Core/Pricing/SpatialArbPricer.cs:142
   claim: <satu kalimat: apa yang salah>
@@ -14,10 +14,11 @@ Tulis satu blok per temuan, urut dari paling berat. Maksimal ±20 temuan; 0 temu
 
 | Prefix | Reviewer |
 |---|---|
-| G | Gemini |
 | C | ChatGPT |
 | R | Claude-R (Claude independen) |
 | J | Jansen |
+| B | Claude builder: temuan sendiri saat recheck / self-check (dicatat terpisah agar metrik reviewer tetap jujur) |
+| ~~G~~ | ~~Gemini~~ (keluar dari tim 2026-10-27; prefix tidak dipakai lagi) |
 
 | Severity | Arti |
 |---|---|

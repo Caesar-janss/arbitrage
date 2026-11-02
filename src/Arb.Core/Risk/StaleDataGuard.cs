@@ -1,4 +1,5 @@
 using Arb.Core.MarketData;
+using Arb.Core.Primitives;
 
 namespace Arb.Core.Risk;
 
@@ -10,6 +11,12 @@ public enum Freshness : byte
     ClockUncertain = 3,
     ExchangeLatency = 4,
     BookSilent = 5,
+
+    /// <summary>Older than the strategy's max book age (a stalled depth stream on a live socket looks quiet, not dead).</summary>
+    BookTooOld = 6,
+
+    /// <summary>Both books fresh on their own, but received too far apart to be compared (cross-book skew).</summary>
+    PairSkew = 7,
 }
 
 /// <summary>Estimated venue clock offset (venue − local), from ClockOffsetEstimator (min-RTT filtered).</summary>
@@ -31,12 +38,23 @@ public readonly struct VenueClock
 
 public readonly struct FreshnessLimits
 {
-    public FreshnessLimits(double maxExchangeLatencyMs, double maxBookSilenceMs, double maxConnectionSilenceMs, double maxClockUncertaintyMs)
+    /// <summary>Venue event timestamps have millisecond resolution: a −1 ms "latency" is rounding, not a clock error.</summary>
+    public const double TimestampResolutionMs = 1.0;
+
+    public FreshnessLimits(
+        double maxExchangeLatencyMs,
+        double maxBookSilenceMs,
+        double maxConnectionSilenceMs,
+        double maxClockUncertaintyMs,
+        double maxBookAgeMs,
+        double maxPairSkewMs)
     {
         MaxExchangeLatencyMs = maxExchangeLatencyMs;
         MaxBookSilenceMs = maxBookSilenceMs;
         MaxConnectionSilenceMs = maxConnectionSilenceMs;
         MaxClockUncertaintyMs = maxClockUncertaintyMs;
+        MaxBookAgeMs = maxBookAgeMs;
+        MaxPairSkewMs = maxPairSkewMs;
     }
 
     public double MaxExchangeLatencyMs { get; }
@@ -47,10 +65,26 @@ public readonly struct FreshnessLimits
 
     public double MaxClockUncertaintyMs { get; }
 
-    public static FreshnessLimits From(RiskLimits limits)
+    /// <summary>Strategy-specific max age of the last book update (spatial: hundreds of ms; funding: seconds).</summary>
+    public double MaxBookAgeMs { get; }
+
+    /// <summary>Max |receive time A − receive time B| for a pair decision.</summary>
+    public double MaxPairSkewMs { get; }
+
+    /// <summary>STRICTEST limits (spatial). Use <see cref="From(RiskLimits, StrategyKind)"/> to be explicit.</summary>
+    public static FreshnessLimits From(RiskLimits limits) => From(limits, StrategyKind.Spatial);
+
+    public static FreshnessLimits From(RiskLimits limits, StrategyKind strategy)
     {
         ArgumentNullException.ThrowIfNull(limits);
-        return new FreshnessLimits(limits.MaxExchangeLatencyMs, limits.MaxBookSilenceMs, limits.MaxConnectionSilenceMs, limits.MaxClockUncertaintyMs);
+        bool spatial = strategy == StrategyKind.Spatial;
+        return new FreshnessLimits(
+            limits.MaxExchangeLatencyMs,
+            limits.MaxBookSilenceMs,
+            limits.MaxConnectionSilenceMs,
+            limits.MaxClockUncertaintyMs,
+            spatial ? limits.MaxSpatialBookAgeMs : limits.MaxFundingBookAgeMs,
+            spatial ? limits.MaxSpatialPairSkewMs : limits.MaxFundingPairSkewMs);
     }
 }
 
@@ -59,8 +93,11 @@ public readonly struct FreshnessLimits
 ///   1. integrity (book not Synced: seq gap, checksum, crossed) — corrupt-but-fresh is the worst case
 ///   2. connection liveness (any frame incl. pong) — a frozen socket looks like a quiet market
 ///   3. clock offset known — without it "exchangeTs vs localTs &gt; 150 ms" compares two different clocks
-///   4. transport latency of the last update, offset-corrected
+///   4. transport latency of the last update, offset-corrected; NEGATIVE beyond clock uncertainty + 1 ms = the offset
+///      estimate is wrong → ClockUncertain (R-07: −500 ms used to pass)
 ///   5. book silence (event-driven feeds: quiet ≠ stale, so this limit is generous / per-instrument)
+///   6. strategy max book age (spatial must price on books updated within ~1 s even if the socket is alive)
+///   pair: both legs, then cross-book receive skew
 /// </summary>
 public static class StaleDataGuard
 {
@@ -92,20 +129,31 @@ public static class StaleDataGuard
         BookStamp s = book.Stamp;
         double exchangeInLocalMs = (s.ExchangeUnixMicros / 1000.0) - clock.OffsetMs;
         transportLatencyMs = (s.LocalRecvUnixMicros / 1000.0) - exchangeInLocalMs;
-        if (transportLatencyMs > limits.MaxExchangeLatencyMs)
+        if (!(transportLatencyMs >= -(clock.UncertaintyMs + FreshnessLimits.TimestampResolutionMs)))
+        {
+            return Freshness.ClockUncertain; // event "arrived before it happened": offset estimate is wrong
+        }
+
+        if (!(transportLatencyMs <= limits.MaxExchangeLatencyMs))
         {
             return Freshness.ExchangeLatency;
         }
 
-        if ((nowMonoMicros - s.LocalRecvMonoMicros) / 1000.0 > limits.MaxBookSilenceMs)
+        double ageMs = (nowMonoMicros - s.LocalRecvMonoMicros) / 1000.0;
+        if (!(ageMs <= limits.MaxBookSilenceMs))
         {
             return Freshness.BookSilent;
+        }
+
+        if (!(ageMs <= limits.MaxBookAgeMs))
+        {
+            return Freshness.BookTooOld;
         }
 
         return Freshness.Fresh;
     }
 
-    /// <summary>Both legs must be fresh; returns the first failing check (leg A first).</summary>
+    /// <summary>Both legs must be fresh (first failing check, leg A first) and received within MaxPairSkewMs of each other.</summary>
     public static Freshness CheckPair(
         BookView a,
         long connectionLastFrameA,
@@ -120,6 +168,17 @@ public static class StaleDataGuard
         Freshness fa = Check(a, nowMonoMicros, connectionLastFrameA, clockA, limits, out double la);
         Freshness fb = Check(b, nowMonoMicros, connectionLastFrameB, clockB, limits, out double lb);
         worstLatencyMs = double.IsNaN(la) ? lb : double.IsNaN(lb) ? la : Math.Max(la, lb);
-        return fa != Freshness.Fresh ? fa : fb;
+        if (fa != Freshness.Fresh)
+        {
+            return fa;
+        }
+
+        if (fb != Freshness.Fresh)
+        {
+            return fb;
+        }
+
+        double skewMs = Math.Abs(a.Stamp.LocalRecvMonoMicros - b.Stamp.LocalRecvMonoMicros) / 1000.0;
+        return skewMs <= limits.MaxPairSkewMs ? Freshness.Fresh : Freshness.PairSkew;
     }
 }

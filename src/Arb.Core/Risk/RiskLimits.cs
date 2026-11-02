@@ -31,6 +31,17 @@ public sealed record RiskLimits
 
     public double MaxClockUncertaintyMs { get; init; } = 20;
 
+    /// <summary>Spatial prices both books NOW: each must have been updated within this (R-07).</summary>
+    public double MaxSpatialBookAgeMs { get; init; } = 1_000;
+
+    /// <summary>Spatial: max receive-time skew between the two books.</summary>
+    public double MaxSpatialPairSkewMs { get; init; } = 500;
+
+    /// <summary>Funding entry/exit tolerates quieter books (hold time is hours).</summary>
+    public double MaxFundingBookAgeMs { get; init; } = 5_000;
+
+    public double MaxFundingPairSkewMs { get; init; } = 2_000;
+
     // ── Sizing / edge ──────────────────────────────────────────────────────────
     public double MaxNotionalPerTradeQuote { get; init; } = 500;
 
@@ -85,6 +96,13 @@ public sealed record RiskLimits
 
     public double MinEntryLiqDistanceBps { get; init; } = 3_000;
 
+    // ── Holding (C-10) ──────────────────────────────────────────────────────────
+    /// <summary>
+    /// Largest unhedged value (quote) a POSITION_OPEN holding may carry, e.g. base-fee dust after a hedge sized in perp
+    /// lots. Converted per trade with TradeGroup.HoldingDeltaTolerance. Default 1 USDT (same order as the dust_quote alert).
+    /// </summary>
+    public double MaxHoldingDeltaQuote { get; init; } = 1.0;
+
     public IReadOnlyList<string> Validate()
     {
         var errors = new List<string>();
@@ -96,9 +114,19 @@ public sealed record RiskLimits
             }
         }
 
+        // R-18: every double must be finite — NaN fails ordinary comparisons in some places and passes them in others
+        foreach ((string name, double value) in Doubles())
+        {
+            Require(double.IsFinite(value), name + " must be finite");
+        }
+
         Require(MaxExchangeLatencyMs > 0, "MaxExchangeLatencyMs > 0");
         Require(MaxBookSilenceMs > 0 && MaxConnectionSilenceMs > 0, "silence limits > 0");
         Require(MaxClockUncertaintyMs > 0 && MaxClockUncertaintyMs < MaxExchangeLatencyMs, "0 < MaxClockUncertaintyMs < MaxExchangeLatencyMs");
+        Require(MaxSpatialBookAgeMs > 0 && MaxSpatialBookAgeMs <= MaxBookSilenceMs, "0 < MaxSpatialBookAgeMs <= MaxBookSilenceMs");
+        Require(MaxFundingBookAgeMs > 0 && MaxFundingBookAgeMs <= MaxBookSilenceMs, "0 < MaxFundingBookAgeMs <= MaxBookSilenceMs");
+        Require(MaxSpatialPairSkewMs > 0 && MaxSpatialPairSkewMs <= MaxSpatialBookAgeMs, "0 < MaxSpatialPairSkewMs <= MaxSpatialBookAgeMs");
+        Require(MaxFundingPairSkewMs > 0 && MaxFundingPairSkewMs <= MaxFundingBookAgeMs, "0 < MaxFundingPairSkewMs <= MaxFundingBookAgeMs");
         Require(MaxNotionalPerTradeQuote > 0, "MaxNotionalPerTradeQuote > 0");
         Require(MinProfitQuote >= 0, "MinProfitQuote >= 0");
         Require(MinMarginalEdgeBps >= 0, "MinMarginalEdgeBps >= 0");
@@ -117,8 +145,47 @@ public sealed record RiskLimits
             "MarginTarget > Warn > Reduce > Critical > 0");
         Require(MaxLeverage is >= 1 and <= 20, "MaxLeverage 1..20");
         Require(MaxBreakEvenHours > 0, "MaxBreakEvenHours > 0");
+        Require(MinFundingNetApr is >= -1 and <= 10, "MinFundingNetApr in [-1, 10] (fraction per year)");
         Require(MinEntryLiqDistanceBps > MarginWarnBps, "MinEntryLiqDistanceBps > MarginWarnBps (entry must start healthy)");
+        Require(MaxHoldingDeltaQuote >= 0, "MaxHoldingDeltaQuote >= 0");
         return errors;
+    }
+
+    private IEnumerable<(string Name, double Value)> Doubles()
+    {
+        yield return (nameof(MaxExchangeLatencyMs), MaxExchangeLatencyMs);
+        yield return (nameof(MaxBookSilenceMs), MaxBookSilenceMs);
+        yield return (nameof(MaxConnectionSilenceMs), MaxConnectionSilenceMs);
+        yield return (nameof(MaxClockUncertaintyMs), MaxClockUncertaintyMs);
+        yield return (nameof(MaxSpatialBookAgeMs), MaxSpatialBookAgeMs);
+        yield return (nameof(MaxSpatialPairSkewMs), MaxSpatialPairSkewMs);
+        yield return (nameof(MaxFundingBookAgeMs), MaxFundingBookAgeMs);
+        yield return (nameof(MaxFundingPairSkewMs), MaxFundingPairSkewMs);
+        yield return (nameof(MaxNotionalPerTradeQuote), MaxNotionalPerTradeQuote);
+        yield return (nameof(MinProfitQuote), MinProfitQuote);
+        yield return (nameof(MinMarginalEdgeBps), MinMarginalEdgeBps);
+        yield return (nameof(MaxStopLossBps), MaxStopLossBps);
+        yield return (nameof(SevereLossBps), SevereLossBps);
+        yield return (nameof(MaxDailyDrawdownPct), MaxDailyDrawdownPct);
+        yield return (nameof(SanityMaxGrossEdgeBps), SanityMaxGrossEdgeBps);
+        yield return (nameof(WalletClosedMaxEdgeBps), WalletClosedMaxEdgeBps);
+        yield return (nameof(NonReplenishableInventoryFraction), NonReplenishableInventoryFraction);
+        yield return (nameof(MarginTargetBps), MarginTargetBps);
+        yield return (nameof(MarginWarnBps), MarginWarnBps);
+        yield return (nameof(MarginReduceBps), MarginReduceBps);
+        yield return (nameof(MarginCriticalBps), MarginCriticalBps);
+        yield return (nameof(MaxLeverage), MaxLeverage);
+        yield return (nameof(MaxBreakEvenHours), MaxBreakEvenHours);
+        yield return (nameof(MinFundingNetApr), MinFundingNetApr);
+        yield return (nameof(MinEntryLiqDistanceBps), MinEntryLiqDistanceBps);
+        yield return (nameof(MaxHoldingDeltaQuote), MaxHoldingDeltaQuote);
+        if (RepairLadderBps is not null)
+        {
+            for (int i = 0; i < RepairLadderBps.Count; i++)
+            {
+                yield return (nameof(RepairLadderBps) + "[" + i + "]", RepairLadderBps[i]);
+            }
+        }
     }
 
     private static bool IsStrictlyIncreasingPositive(IReadOnlyList<double> values)
