@@ -15,6 +15,12 @@ namespace Arb.Core.Execution;
 ///     the DB's is_flat uses the same rule, so C# and SQL share ONE definition of flat (R-14);
 ///   * gross perp = the signed position on EVERY perp instrument the trade traded (entry legs and hedges). A spatial
 ///     residual hedged on a perp has delta 0 but two open positions (R-02): it is POSITION_OPEN, not REPAIRED.
+/// POSITION_OPEN = a delta-neutral holding (C-10), for every strategy and every way in (entry, repair hedge, back from a
+/// partial exit): |net delta − accepted dust| ≤ <see cref="MaxHoldingDeltaCanon"/>, from actual fills. The tolerance is
+/// fixed per trade at <see cref="Initialize(long, StrategyKind, InstrumentKey, InstrumentKey, decimal, long, decimal)"/>
+/// from a risk budget (<see cref="HoldingDeltaTolerance"/>); the overload without it uses 0 (fail-closed). The DB trigger
+/// guards lifecycle and labels only: an exposure check there would depend on the order in which the persistence writer
+/// stores fills and state, so the exposure invariant is owned by Core.
 /// </summary>
 public sealed class TradeGroup
 {
@@ -64,8 +70,40 @@ public sealed class TradeGroup
     /// <summary>Signed residual written off as untradeable dust (0 = none). Persist as trd.trade_group.dust_accepted_base.</summary>
     public decimal DustAcceptedCanon { get; private set; }
 
-    public void Initialize(long tradeId, StrategyKind strategy, InstrumentKey buy, InstrumentKey sell, decimal targetQtyCanon, long createdAtMicros)
+    /// <summary>Largest |net delta − accepted dust| (canonical base) allowed in POSITION_OPEN (C-10). 0 = exactly neutral.</summary>
+    public decimal MaxHoldingDeltaCanon { get; private set; }
+
+    /// <summary>
+    /// Canonical holding tolerance from a risk budget: <paramref name="maxHoldingDeltaQuote"/> of unhedged value at
+    /// <paramref name="referencePx"/>, truncated to 1e-12 (never above the budget). Not "one perp lot": a BTC perp lot of
+    /// 0.001 is ~60 USDT.
+    /// </summary>
+    public static decimal HoldingDeltaTolerance(double maxHoldingDeltaQuote, double referencePx)
     {
+        if (!double.IsFinite(maxHoldingDeltaQuote) || maxHoldingDeltaQuote < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxHoldingDeltaQuote), maxHoldingDeltaQuote, "finite and >= 0");
+        }
+
+        if (!double.IsFinite(referencePx) || !(referencePx > 0))
+        {
+            throw new ArgumentOutOfRangeException(nameof(referencePx), referencePx, "finite and > 0");
+        }
+
+        return decimal.Round((decimal)(maxHoldingDeltaQuote / referencePx), 12, MidpointRounding.ToZero);
+    }
+
+    /// <summary>Pre-existing overload: holding tolerance 0 (POSITION_OPEN only when exactly delta-neutral).</summary>
+    public void Initialize(long tradeId, StrategyKind strategy, InstrumentKey buy, InstrumentKey sell, decimal targetQtyCanon, long createdAtMicros) =>
+        Initialize(tradeId, strategy, buy, sell, targetQtyCanon, createdAtMicros, 0m);
+
+    public void Initialize(long tradeId, StrategyKind strategy, InstrumentKey buy, InstrumentKey sell, decimal targetQtyCanon, long createdAtMicros, decimal maxHoldingDeltaCanon)
+    {
+        if (maxHoldingDeltaCanon < 0m)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxHoldingDeltaCanon), maxHoldingDeltaCanon, "must be >= 0");
+        }
+
         if (tradeId <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(tradeId), tradeId, "must be > 0");
@@ -86,6 +124,7 @@ public sealed class TradeGroup
         BuyInstrument = buy;
         SellInstrument = sell;
         TargetQtyCanon = targetQtyCanon;
+        MaxHoldingDeltaCanon = maxHoldingDeltaCanon;
         _state = TradeStateRecord.Create(createdAtMicros);
         BoughtCanon = 0m;
         SoldCanon = 0m;
@@ -184,7 +223,8 @@ public sealed class TradeGroup
 
     /// <summary>
     /// State transition with exposure rules on top of the transition table: no terminal flat state while a perp
-    /// position is open; a SPATIAL trade enters POSITION_OPEN only as a perp-hedged residual.
+    /// position is open; a SPATIAL trade enters POSITION_OPEN only as a perp-hedged residual; and no trade enters
+    /// POSITION_OPEN unless delta-neutral within <see cref="MaxHoldingDeltaCanon"/> (C-10).
     /// </summary>
     public TransitionError TransitionTo(TradeState to, long atMicros)
     {
@@ -203,9 +243,17 @@ public sealed class TradeGroup
                 }
             }
 
-            if (Strategy == StrategyKind.Spatial && to == TradeState.PositionOpen && !HasOpenPerpPosition)
+            if (to == TradeState.PositionOpen)
             {
-                return TransitionError.NotHedged;
+                if (Strategy == StrategyKind.Spatial && !HasOpenPerpPosition)
+                {
+                    return TransitionError.NotHedged;
+                }
+
+                if (Math.Abs(NetBaseDelta - DustAcceptedCanon) > MaxHoldingDeltaCanon)
+                {
+                    return TransitionError.UnhedgedDelta;
+                }
             }
         }
 

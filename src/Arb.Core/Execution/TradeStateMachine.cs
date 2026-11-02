@@ -18,6 +18,12 @@ public enum TransitionError : byte
 
     /// <summary>Terminal state requested while net delta ≠ the residual explicitly accepted as dust (TradeGroup, R-14).</summary>
     UnacceptedResidual = 7,
+
+    /// <summary>
+    /// POSITION_OPEN requested while |net delta − accepted dust| exceeds the trade's holding tolerance: the position is not
+    /// delta-neutral, the unhedged part is a residual (TradeGroup, C-10).
+    /// </summary>
+    UnhedgedDelta = 8,
 }
 
 /// <summary>

@@ -96,6 +96,13 @@ public sealed record RiskLimits
 
     public double MinEntryLiqDistanceBps { get; init; } = 3_000;
 
+    // ── Holding (C-10) ──────────────────────────────────────────────────────────
+    /// <summary>
+    /// Largest unhedged value (quote) a POSITION_OPEN holding may carry, e.g. base-fee dust after a hedge sized in perp
+    /// lots. Converted per trade with TradeGroup.HoldingDeltaTolerance. Default 1 USDT (same order as the dust_quote alert).
+    /// </summary>
+    public double MaxHoldingDeltaQuote { get; init; } = 1.0;
+
     public IReadOnlyList<string> Validate()
     {
         var errors = new List<string>();
@@ -140,6 +147,7 @@ public sealed record RiskLimits
         Require(MaxBreakEvenHours > 0, "MaxBreakEvenHours > 0");
         Require(MinFundingNetApr is >= -1 and <= 10, "MinFundingNetApr in [-1, 10] (fraction per year)");
         Require(MinEntryLiqDistanceBps > MarginWarnBps, "MinEntryLiqDistanceBps > MarginWarnBps (entry must start healthy)");
+        Require(MaxHoldingDeltaQuote >= 0, "MaxHoldingDeltaQuote >= 0");
         return errors;
     }
 
@@ -170,6 +178,7 @@ public sealed record RiskLimits
         yield return (nameof(MaxBreakEvenHours), MaxBreakEvenHours);
         yield return (nameof(MinFundingNetApr), MinFundingNetApr);
         yield return (nameof(MinEntryLiqDistanceBps), MinEntryLiqDistanceBps);
+        yield return (nameof(MaxHoldingDeltaQuote), MaxHoldingDeltaQuote);
         if (RepairLadderBps is not null)
         {
             for (int i = 0; i < RepairLadderBps.Count; i++)

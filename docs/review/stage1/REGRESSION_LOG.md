@@ -686,3 +686,42 @@ C-10 (C-10 = konfirmasi observasi builder di ronde 2).
   benar-benar kausal. Penghitung terima lokal hanya urutan kiriman pada satu koneksi, bukan bukti urutan data venue (catatan
   reviewer).
 
+## C-10 (S1) — hedge tidak seimbang masih bisa masuk POSITION_OPEN
+
+Konfirmasi reviewer atas observasi builder di ronde 2. Akar masalahnya lebih luas dari spatial: `POSITION_OPEN` berarti
+holding delta-netral, tetapi `TradeGroup` hanya mengecek bahwa perp **ada** (spatial) atau tidak mengecek apa pun (funding).
+
+- **Test**: `Regression/C10_UnbalancedHoldingTests.cs` (6, API lama: hanya buy-back perp terisi = kasus reviewer; kedua kaki
+  dikurangi dengan ukuran berbeda; hedge repair awal parsial; fee base meninggalkan delta dengan toleransi default 0; entry
+  funding dengan satu kaki terisi sebagian (perluasan builder); guard holding seimbang) dan
+  `Regression/C10_HoldingDeltaToleranceTests.cs` (7, API baru: kode `UnhedgedDelta` dan state tidak berubah; tanpa perp tetap
+  `NotHedged`; dust fee base dalam budget risiko diterima; toleransi inklusif dan exact; satu lot perp **tidak** otomatis aman;
+  funding memakai aturan yang sama; validasi).
+- **MERAH (perilaku, API lama)**:
+  ```
+  FAIL …ReviewerCase_OnlyThePerpBuyBackFilled_DoesNotReturnToPositionOpen   Expected: Not None  Actual: None
+  FAIL …BothLegsReduced_ByDifferentSizes_DoesNotReturnToPositionOpen        Expected: Not None  Actual: None
+  FAIL …PartialRepairHedge_DoesNotEnterPositionOpen                         Expected: Not None  Actual: None
+  FAIL …BaseFeeLeavesADelta_AndTheDefaultToleranceIsZero                    Expected: Not None  Actual: None
+  FAIL …FundingEntry_WithOneLegPartlyFilled_DoesNotEnterPositionOpen        Expected: Not None  Actual: None
+  TOTAL: 1 passed, 5 failed
+  ```
+  (yang lulus: holding seimbang, guard.) Versi pertama test "ukuran berbeda" salah tanda (jual spot 0,004 + buy-back perp
+  0,002 = **−0,002**, over-hedged), dikoreksi sebelum merah dicatat. `Assert.NotEqual` ditambahkan ke shim xUnit offline
+  (xUnit asli sudah punya).
+- **MERAH (compile, API baru)**: `TransitionError` tidak punya `UnhedgedDelta`; `TradeGroup` tidak punya
+  `HoldingDeltaTolerance` / `MaxHoldingDeltaCanon` / `Initialize` 7 argumen; `RiskLimits` tidak punya `MaxHoldingDeltaQuote`.
+- **Patch**: `TradeGroup.TransitionTo(PositionOpen)` untuk **semua** strategi: spatial tanpa perp → `NotHedged`; lalu
+  `|NetBaseDelta − DustAcceptedCanon| > MaxHoldingDeltaCanon` → `UnhedgedDelta` (state tidak berubah). `MaxHoldingDeltaCanon`
+  ditetapkan per trade di `Initialize(…, maxHoldingDeltaCanon)`; overload lama memakai 0 (fail-closed).
+  `TradeGroup.HoldingDeltaTolerance(maxHoldingDeltaQuote, px)` mengubah budget quote ke kanonik (dipotong ke 1e-12, tidak
+  pernah melebihi budget). `RiskLimits.MaxHoldingDeltaQuote` (default 1 USDT, divalidasi finite ≥ 0). SQL tidak diubah:
+  trigger hanya menjaga lifecycle/label. Cek eksposur di trigger akan bergantung pada urutan penulisan fill vs state oleh
+  persistence writer (belum ada sebelum Tahap 3), jadi invariant eksposur tetap milik Core. Kedua guard **tidak** identik.
+- **HIJAU**: `C10_UnbalancedHoldingTests 6 passed`, `C10_HoldingDeltaToleranceTests 7 passed`; full suite `317 passed, 0
+  failed` (test R-02/R-10/C-08 yang ada tetap lulus karena delta-nya 0).
+- **Mutation** (6, semua tertangkap): tanpa cek delta (9 test); hanya spatial (2); batas eksklusif (2); hanya satu arah (4);
+  helper tanpa pemotongan (1); default overload = satu lot perp (2).
+- **Keputusan untuk Jansen**: nilai `MaxHoldingDeltaQuote` (default 1 USDT). Lebih besar = lebih sedikit repair tambahan
+  setelah hedge yang dibulatkan ke lot perp; lebih kecil = eksposur telanjang lebih kecil saat holding.
+
