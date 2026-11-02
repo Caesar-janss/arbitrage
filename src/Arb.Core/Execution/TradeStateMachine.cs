@@ -82,8 +82,10 @@ public static class TradeStateMachine
     {
         if (strategy == StrategyKind.Spatial)
         {
-            // a spatial trade holds a position only as a perp-hedged residual (REPAIRING → POSITION_OPEN)
-            return to != TradeState.PositionOpen || from == TradeState.Repairing;
+            // A spatial trade holds a position only as a perp-hedged residual: entered from REPAIRING (R-02), and back
+            // from EXITING after a partial unwind of both legs (C-08). Never straight from IN_FLIGHT. That the hedge is
+            // still open is checked by TradeGroup (NotHedged) and, in SQL, by repair_method = PERP_HEDGE.
+            return to != TradeState.PositionOpen || from is TradeState.Repairing or TradeState.Exiting;
         }
 
         return to != TradeState.Completed;

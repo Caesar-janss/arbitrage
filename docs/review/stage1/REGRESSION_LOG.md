@@ -508,3 +508,39 @@ R-06/R-03/R-13/R-01 (reviewer mengonfirmasi reproduksi aslinya kini tertutup). U
 - **Belum terbukti (NEEDS-DATA, Tahap 2)**: lag cache REST wallet tiap venue terhadap stream (menentukan batas bawah stamp
   snapshot bila venue tidak memberi waktu as-of).
 
+## C-08 (S2) — hedge spatial tidak bisa kembali POSITION_OPEN setelah partial exit
+
+- **Test C#**: `Regression/C08_SpatialHedgePartialExitTests.cs` (5, API lama; fixture sama dengan R-02: spot +0.01 / perp
+  −0.01 → `POSITION_OPEN → EXITING`; jual 0.004 spot + buy-back 0.004 perp → `POSITION_OPEN`; sisa ditutup → `CLOSED`;
+  perp habis tapi spot tersisa → `NotHedged` lalu `RESIDUAL`; entry `IN_FLIGHT → POSITION_OPEN` tetap ditolak).
+- **Test DB**: blok baru "regression ronde 2" di `db/tests/test_schema.sql` (di-rollback), trade 1013–1015: partial unwind
+  0.004/0.004 lalu tutup, `v_trade_ledger` (delta 0, tidak flat, `open_perp_qty_base` 0.006), `v_open_exposure`, urutan
+  `trade_state_log`, dan dua penolakan.
+- **MERAH (perilaku, API lama)**:
+  ```
+  FAIL …PartialUnwindOfBothLegs_ReturnsToPositionOpen          Expected: None  Actual: StrategyNotAllowed
+  FAIL …AfterAPartialUnwind_TheRestUnwindsToClosed             Expected: None  Actual: StrategyNotAllowed
+  FAIL …StrategyRule_AllowsExitingToPositionOpen_ForSpatial    Assert.True() Failure
+  TOTAL: 2 passed, 3 failed
+  ```
+  DB (migrasi V001…V007):
+  ```
+  ERROR:  trade 1013: SPATIAL hanya masuk POSITION_OPEN dari REPAIRING dengan PERP_HEDGE (dari EXITING, metode PERP_HEDGE)
+  ```
+- **Patch**: `TradeStateMachine.IsAllowedFor(Spatial, from, PositionOpen)` menerima `from` REPAIRING **atau** EXITING.
+  Migrasi baru `V008__review_round2_fixes.sql` (V007 tidak diubah): trigger menerima `OLD.state IN ('REPAIRING','EXITING')`
+  dengan `repair_method = 'PERP_HEDGE'`. Cek "perp masih terbuka" tetap di `TradeGroup` (`NotHedged`); SQL hanya menjaga
+  label, sesuai catatan reviewer bahwa kedua guard tidak identik.
+- **HIJAU**: `C08_SpatialHedgePartialExitTests 5 passed`; full suite `269 passed, 0 failed`; DB `ALL TESTS PASSED`,
+  assertion `NOTICE: PASS` 118 → 124. (Angka "119" di ringkasan ronde 1 menghitung baris `ALL TESTS PASSED`; jumlah
+  assertion sebenarnya 118.)
+- **Mutation**: C# "izinkan dari state mana pun kecuali CREATED" → 2 test merah. SQL "izinkan juga IN_FLIGHT" →
+  **versi pertama test DB tidak menangkapnya**: penolakan IN_FLIGHT lulus karena `repair_method` NULL (klausa lain). Test
+  diperketat: trade diberi label `PERP_HEDGE` dulu dan pesan harus memuat `(dari IN_FLIGHT, metode PERP_HEDGE)` → mutan
+  tertangkap. SQL "hapus klausa repair_method" → tertangkap (R-02 dan C-08).
+- **Batas yang dicatat (bukan klaim selesai)**: aturan spatial `POSITION_OPEN` memeriksa bahwa hedge **ada**
+  (`HasOpenPerpPosition`), bukan bahwa rasio hedge seimbang. Partial unwind dengan kaki tidak seimbang (mis. jual spot 0.004,
+  buy-back perp 0.002) masih bisa kembali `POSITION_OPEN` dengan delta +0.002. Toleransi rasio bergantung pada lot perp
+  venue; usulan: host memakai `IsDeltaNeutral(perpLot)` sebelum `TransitionTo(PositionOpen)`, selain itu `RESIDUAL`. Diajukan
+  ke reviewer untuk triase, belum diubah di Core.
+
