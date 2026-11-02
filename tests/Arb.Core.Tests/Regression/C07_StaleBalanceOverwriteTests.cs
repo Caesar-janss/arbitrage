@@ -116,8 +116,10 @@ public class C07_StaleBalanceOverwriteTests
 }
 
 /// <summary>
-/// Shared discrete-event model for C-07. <paramref name="deliverStream"/> decides how the user-stream events reach the
-/// ledger (unsequenced here; with a delivery sequence in C07_BalanceSequencingTests). Snapshots are always unsequenced.
+/// Shared discrete-event model for C-07 / C-09. <paramref name="deliverStream"/> decides how the user-stream events reach
+/// the ledger (unsequenced, or with a delivery sequence). Snapshots carry an as-of INTERVAL [t − jitter, t + jitter]
+/// around the venue time t they were taken (C-09: a REST snapshot's as-of is only known to lie in such an interval);
+/// with jitter 0 they are exact-as-of points delivered through the pre-existing 3-argument API.
 /// </summary>
 internal static class LedgerModel
 {
@@ -125,7 +127,19 @@ internal static class LedgerModel
 
     public delegate void StreamDelivery(InventoryLedger ledger, int slot, decimal value, long venueEventMs, long sequence);
 
+    public delegate void SnapshotDelivery(InventoryLedger ledger, int slot, decimal value, long asOfNotBeforeMs, long asOfNotAfterMs);
+
     public static string? Run(TestMarkets m, int seed, int steps, StreamDelivery deliverStream, ref int sameMsReorders)
+    {
+        int unused = 0;
+        return Run(m, seed, steps, deliverStream, ExactSnapshot, maxJitterMs: 0, ref sameMsReorders, ref unused);
+    }
+
+    /// <param name="intervalReorders">
+    /// Coverage of the C-09 case: a stream event delivered after a snapshot whose interval contains the event's time,
+    /// although the event is causally OLDER than the snapshot and carries another value.
+    /// </param>
+    public static string? Run(TestMarkets m, int seed, int steps, StreamDelivery deliverStream, SnapshotDelivery deliverSnapshot, int maxJitterMs, ref int sameMsReorders, ref int intervalReorders)
     {
         var rng = new Random(seed);
         var l = new InventoryLedger(m.Assets, 256);
@@ -135,7 +149,8 @@ internal static class LedgerModel
         var ourFills = new List<(int Pos, decimal Amount)>();
         var stream = new Queue<int>();
         var terminals = new Queue<(ReservationHandle H, long Ms)>();
-        var snapshots = new List<(int Pos, long Stamp)>();
+        var snapshots = new List<(int Pos, long Lo, long Hi)>();
+        var deliveredSnapshots = new List<(int Pos, long Lo, long Hi)>();
         long ms = 1_000;
         decimal f = 100m;
         long seq = 0;
@@ -184,7 +199,8 @@ internal static class LedgerModel
                 }
 
                 case Op.Snapshot:
-                    snapshots.Add((history.Count - 1, ms));          // as-of time = the venue time it was taken
+                    // as-of = the venue time it was taken; the host only knows an interval around it
+                    snapshots.Add((history.Count - 1, ms - rng.Next(0, maxJitterMs + 1), ms + rng.Next(0, maxJitterMs + 1)));
                     break;
 
                 case Op.DeliverStream:
@@ -192,6 +208,15 @@ internal static class LedgerModel
                     {
                         int pos = stream.Dequeue();
                         Track(pos, history[pos].Ms, history, ref newest, ref newestStampMs, ref sameMsReorders);
+                        foreach ((int sp, long lo, long hi) in deliveredSnapshots)
+                        {
+                            if (sp > pos && lo <= history[pos].Ms && history[pos].Ms <= hi && history[sp].Value != history[pos].Value)
+                            {
+                                intervalReorders++;
+                                break;
+                            }
+                        }
+
                         deliverStream(l, slot, history[pos].Value, history[pos].Ms, ++seq);
                     }
 
@@ -210,10 +235,11 @@ internal static class LedgerModel
                     if (snapshots.Count > 0)
                     {
                         int i = rng.Next(snapshots.Count);
-                        (int pos, long stamp) = snapshots[i];
+                        (int pos, long lo, long hi) = snapshots[i];
                         snapshots.RemoveAt(i);
-                        Track(pos, stamp, history, ref newest, ref newestStampMs, ref sameMsReorders);
-                        l.OnBalance(slot, history[pos].Value, stamp);
+                        Track(pos, lo, history, ref newest, ref newestStampMs, ref sameMsReorders);
+                        deliveredSnapshots.Add((pos, lo, hi));
+                        deliverSnapshot(l, slot, history[pos].Value, lo, hi);
                     }
 
                     break;
@@ -236,6 +262,9 @@ internal static class LedgerModel
 
         return null;
     }
+
+    private static void ExactSnapshot(InventoryLedger l, int slot, decimal value, long asOfNotBeforeMs, long asOfNotAfterMs) =>
+        l.OnBalance(slot, value, asOfNotBeforeMs); // jitter 0: lo == hi == exact as-of
 
     private static void Track(int pos, long stamp, List<(long Ms, decimal Value)> history, ref int newest, ref long newestStampMs, ref int sameMsReorders)
     {

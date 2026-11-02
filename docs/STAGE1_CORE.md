@@ -28,7 +28,8 @@
 | R-18 | gate funding & `RiskLimits.Validate` menolak NaN/∞ | – |
 | R-19 | dust dinilai di venue tempat ia berada (bid beli / ask jual) | – |
 | R-20 | kontrak semua enum ↔ SQL, brute force Q* dengan hurdle/cap/haircut, komentar SQL dibuang | – |
-| C-07 | dua observasi saldo di ms yang sama tanpa urutan → `Conflict`: simpan nilai **terkecil** + `NeedsReconcile`; stream user dengan nomor urut kirim diurutkan dalam 1 ms | stream: `OnBalance(slot, free, ms, seq)` (seq naik per slot, 1 sumber per slot); REST: stamp = waktu *as-of* venue atau batas bawahnya, **jangan** waktu terima lokal / waktu baru untuk data cache |
+| C-07 | dua observasi saldo di ms yang sama tanpa urutan → `Conflict`: simpan nilai **terkecil** + `NeedsReconcile`; stream user dengan nomor urut kirim diurutkan dalam 1 ms | stream: `OnBalance(slot, free, ms, seq)` (seq naik per slot, 1 sumber per slot). ~~REST: stamp batas bawah~~ **salah, dikoreksi C-09** |
+| C-09 | observasi saldo = **interval** as-of; saldo hanya naik dari observasi yang pasti lebih baru (batas bawahnya > batas atas semua yang dipegang slot); interval tumpang-tindih → `Conflict` (nilai terkecil); observasi tanpa urutan (walau nilainya sama) mengakhiri urutan dalam 1 ms | REST tanpa as-of exact: `OnBalanceSnapshot(slot, free, notBefore, notAfter)` = [request dikirim − lag cache venue, waktu respons], keduanya waktu venue; as-of exact: `OnBalance(slot, free, ms)`; **jangan** stamp batas bawah lewat API titik |
 | C-08 | hedge spatial yang di-unwind **sebagian** di kedua kaki kembali `EXITING → POSITION_OPEN` (C# + `V008`); entry `IN_FLIGHT → POSITION_OPEN` tetap ditolak | partial unwind: isi kedua kaki dulu, lalu `TransitionTo(PositionOpen)`; bila perp sudah habis tetapi spot tersisa → `RESIDUAL` (`NotHedged`) |
 | C-02 | kaki final (setelah gross-up fee-base & pembulatan lot) dicek ulang terhadap **semua** cap secara exact (notional, qty kedua kaki, level, kedalaman haircut); bila melanggar → ukuran common terbesar yang muat (binary search), atau reject | – |
 | C-01 | `FixedPoint.ToUnits`: snap = 1e-9 + 16 ulp, maksimum 1e-6 unit; tidak pernah menyeberangi integer | – |
@@ -210,6 +211,19 @@ palsu. Seq yang tidak naik → diperlakukan tanpa urutan; waktu venue mundur di 
 karena event yang dibuang bisa berupa debit). Klaim "tidak pernah overstate" berlaku **di bawah kontrak host** (§0 C-07)
 dan diuji dengan model acak (3.000 riwayat, invariant `Available ≤ F(P) − Σ fill kita sesudah P`, P = observasi terbaru
 secara kausal yang sudah diterima). Yang belum terbukti: lag cache REST per venue (NEEDS-DATA, ukur di Tahap 2).
+
+**Koreksi (C-09, re-review ChatGPT):** kontrak host C-07 "bila venue tidak memberi as-of, stamp batas bawah; lebih awal =
+lebih aman" **salah**. Snapshot berstamp batas bawah kalah dari event stream yang sebenarnya *lebih lama* tetapi
+bertimestamp di antara batas bawah dan as-of asli: 100 @1000 → snapshot 20 (dibaca 1010, stamp 1001) → event tertunda
+100 @1005 menimpa → Available 100. Fix: setiap observasi adalah interval as-of; stream event dan snapshot as-of exact =
+titik; snapshot REST = `[request dikirim − lag cache, waktu respons]` lewat `OnBalanceSnapshot`. Saldo hanya **naik** dari
+observasi yang pasti lebih baru daripada semua yang dipegang slot (batas bawahnya > batas atas mereka, atau event
+berikutnya dari stream berurut); observasi yang tumpang-tindih → `Conflict` dengan nilai terkecil dan intervalnya
+digabung; observasi yang pasti lebih lama → `Stale`. Rilis reservasi: fill harus *strictly* sebelum batas bawah observasi
+yang diterapkan, atau sebelum batas bawah terbesar yang dipegang slot (`MarkTerminal`). Saat mengerjakan C-09 ditemukan juga
+lubang di fix C-07 sendiri (as-of exact): duplikat tanpa urutan tidak mengakhiri urutan dalam 1 ms, sehingga event stream
+lama sesudahnya diterapkan (26 → 31). Model acak kini memuat stream tertunda dan snapshot berinterval (2 × 3.000 riwayat)
+plus model exact 5.000 riwayat.
 
 ### 3.10 Kesegaran data (R-07), grid spec (R-08), ID (R-17), persistensi (R-15, R-16)
 - `StaleDataGuard`: selain silence generik, **umur maks per strategi** (`BookTooOld`: spatial 1000 ms, funding 5000 ms) dan

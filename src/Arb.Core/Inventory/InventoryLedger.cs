@@ -31,19 +31,22 @@ public readonly struct ReservationHandle : IEquatable<ReservationHandle>
 /// <summary>Outcome of one balance observation (see <see cref="InventoryLedger.OnBalance(int, decimal, long)"/>).</summary>
 public enum BalanceUpdate : byte
 {
-    /// <summary>Became the slot's balance (strictly later, or the next event of the ordered stream in the same ms).</summary>
+    /// <summary>
+    /// Became the slot's balance: definitely newer than everything the slot holds (its as-of lower bound is after their
+    /// upper bound), or the next event of the ordered stream in the same ms.
+    /// </summary>
     Applied = 1,
 
-    /// <summary>Same millisecond, same value: nothing changes.</summary>
+    /// <summary>Could not be ordered, but has the same value: the value stays, the time bounds widen.</summary>
     Duplicate = 2,
 
-    /// <summary>Older than what the slot already reflects: ignored.</summary>
+    /// <summary>Definitely older than an observation the slot holds: ignored.</summary>
     Stale = 3,
 
     /// <summary>
-    /// Could not be ordered against the slot's balance (same millisecond, different value, at least one side without a
-    /// delivery sequence; or the ordered stream's venue time went backwards). The LOWER value is kept and the slot is
-    /// flagged for a reconcile (C-07). Resolved by the next strictly later observation.
+    /// Could not be ordered against the slot's balance (as-of intervals overlap / same ms without a delivery order; or the
+    /// ordered stream's venue time went backwards) and has another value. The LOWER value is kept and the slot is flagged
+    /// for a reconcile (C-07, C-09). Resolved by the next observation that is definitely newer than all of them.
     /// </summary>
     Conflict = 4,
 }
@@ -64,20 +67,28 @@ public enum BalanceUpdate : byte
 /// While an IOC is in flight the venue may already lock funds AND we still hold the reservation: double
 /// counting in the SAFE direction. Two simultaneous opportunities can never spend the same balance.
 ///
-/// Ordering balance observations (C-07). A millisecond stamp does not order two observations of the same millisecond,
-/// and a late REST snapshot can describe the slot before a change booked in that millisecond (fee, transfer, fill).
+/// Ordering balance observations (C-07, C-09). Every observation has an as-of INTERVAL [notBefore, notAfter] of venue
+/// time: the instant whose state it reports lies in it. A stream event or an exact-as-of snapshot is a point; a REST
+/// snapshot is [request sent − cache lag, response time]. Two observations are ordered only if one interval ends before
+/// the other starts, or both come from the slot's ordered stream; otherwise they are ambiguous.
 ///   * <see cref="OnBalance(int, decimal, long, long)"/>: the ONE ordered user stream of the slot, with a delivery
-///     sequence that strictly increases per slot. Inside a millisecond, delivery order decides.
-///   * <see cref="OnBalance(int, decimal, long)"/>: anything without a delivery order (REST reconcile, a second
-///     connection). Ordered only by venue time; a same-ms observation with another value is a Conflict → keep the lower
-///     value (one of the two is the true latest, so the lower cannot overstate) and flag <see cref="NeedsReconcile"/>.
+///     sequence that strictly increases per slot. Inside a millisecond, delivery order decides — but only while the slot
+///     holds nothing else: any unordered observation (even an equal-valued one) ends same-ms ordering.
+///   * <see cref="OnBalance(int, decimal, long)"/>: a point without a delivery order (exact-as-of snapshot, a second
+///     connection).
+///   * <see cref="OnBalanceSnapshot"/>: a snapshot known only within an interval.
+///   * The slot's balance RISES only from an observation that is definitely newer than everything it holds. An ambiguous
+///     observation is a Conflict → keep the lower value (one of them is the true latest, so the lower cannot overstate)
+///     and flag <see cref="NeedsReconcile"/>; its interval joins the slot's, so the next applied observation must be
+///     newer than all of them. Releases need the fill strictly before the applied observation's LOWER bound.
 ///   * A sequence that does not advance (replay, reconnect reset) is treated as unsequenced. The ordered stream's venue
 ///     time going backwards is a Conflict, not a silent drop (the dropped event could be a debit).
-/// HOST CONTRACT (adapters, Tahap 2): the stamp of an unsequenced snapshot is the venue time the snapshot is known to
-/// reflect (as-of), never the local receive time and never a fresh time on cached data. When the venue gives no as-of
-/// time, stamp a LOWER bound (venue time at request send minus the measured cache lag): an earlier stamp only releases
-/// fewer reservations and loses ties, so it errs on the safe side. "Never overstate" holds under this contract; the
-/// model check in C07_* tests it.
+/// HOST CONTRACT (adapters, Tahap 2): bounds are venue times the observation is KNOWN to lie within, never local
+/// receive time and never a fresh time on cached data. Corrected (C-09): stamping a snapshot with only a lower bound
+/// through the point API is NOT safe — a delayed, older stream event stamped inside the real interval would overwrite
+/// it. A snapshot without an exact venue as-of goes through <see cref="OnBalanceSnapshot"/> with both bounds.
+/// "Never overstate" holds under this contract; the model checks in C07_* / C09_* test it with delayed streams and
+/// interval snapshots.
 ///
 /// SINGLE OWNER THREAD (the executor). Balance events from the user-stream thread are marshalled to it.
 /// </summary>
@@ -89,7 +100,8 @@ public sealed class InventoryLedger
     private readonly int _assetCapacity;
     private readonly decimal[] _venueFree;
     private readonly decimal[] _reserved;
-    private readonly long[] _lastBalanceEventMs;
+    private readonly long[] _maxLo;     // largest as-of lower bound held: ending before it = definitely older
+    private readonly long[] _maxHi;     // largest upper bound: an observation starting after it is definitely newer
     private readonly long[] _lastStreamSeq;
     private readonly long[] _lastStreamMs;
     private readonly bool[] _orderedAtLast;
@@ -112,8 +124,10 @@ public sealed class InventoryLedger
         int slots = VenueSlots * AccountSlots * _assetCapacity;
         _venueFree = new decimal[slots];
         _reserved = new decimal[slots];
-        _lastBalanceEventMs = new long[slots];
-        Array.Fill(_lastBalanceEventMs, long.MinValue);
+        _maxLo = new long[slots];
+        Array.Fill(_maxLo, long.MinValue);
+        _maxHi = new long[slots];
+        Array.Fill(_maxHi, long.MinValue);
         _lastStreamSeq = new long[slots];
         Array.Fill(_lastStreamSeq, long.MinValue);
         _lastStreamMs = new long[slots];
@@ -162,7 +176,23 @@ public sealed class InventoryLedger
     /// Venue-reported FREE balance (excluding venue-side locked) from a source WITHOUT a delivery order (REST reconcile,
     /// a second connection), stamped with the venue time it is known to reflect (see the host contract above).
     /// </summary>
-    public BalanceUpdate OnBalance(int slot, decimal venueFree, long venueEventMs) => Apply(slot, venueFree, venueEventMs, ordered: false);
+    public BalanceUpdate OnBalance(int slot, decimal venueFree, long venueEventMs) => Apply(slot, venueFree, venueEventMs, venueEventMs, ordered: false);
+
+    /// <summary>
+    /// Venue-reported FREE balance from a snapshot whose as-of instant is only known to lie in
+    /// [<paramref name="asOfNotBeforeMs"/>, <paramref name="asOfNotAfterMs"/>] (venue time): request sent minus the
+    /// venue's cache lag, and the response time. It raises the balance only when it is definitely newer than everything
+    /// the slot holds; it releases only fills strictly before <paramref name="asOfNotBeforeMs"/> (C-09).
+    /// </summary>
+    public BalanceUpdate OnBalanceSnapshot(int slot, decimal venueFree, long asOfNotBeforeMs, long asOfNotAfterMs)
+    {
+        if (asOfNotAfterMs < asOfNotBeforeMs)
+        {
+            throw new ArgumentOutOfRangeException(nameof(asOfNotAfterMs), asOfNotAfterMs, "as-of interval must satisfy notBefore ≤ notAfter");
+        }
+
+        return Apply(slot, venueFree, asOfNotBeforeMs, asOfNotAfterMs, ordered: false);
+    }
 
     /// <summary>
     /// Venue-reported FREE balance from the slot's ordered user stream. <paramref name="streamSequence"/> is the
@@ -173,17 +203,17 @@ public sealed class InventoryLedger
     {
         if (streamSequence <= _lastStreamSeq[slot])
         {
-            return Apply(slot, venueFree, venueEventMs, ordered: false); // no delivery order → venue time only
+            return Apply(slot, venueFree, venueEventMs, venueEventMs, ordered: false); // no delivery order → venue time only
         }
 
         _lastStreamSeq[slot] = streamSequence;
         if (venueEventMs < _lastStreamMs[slot])
         {
-            return Conflict(slot, venueFree); // newer by delivery, older by venue time: cannot tell → lower value
+            return Merge(slot, venueFree, venueEventMs, venueEventMs); // newer by delivery, older by venue time: cannot tell
         }
 
         _lastStreamMs[slot] = venueEventMs;
-        return Apply(slot, venueFree, venueEventMs, ordered: true);
+        return Apply(slot, venueFree, venueEventMs, venueEventMs, ordered: true);
     }
 
     public bool TryReserve(int slot, decimal amount, out ReservationHandle handle)
@@ -243,8 +273,10 @@ public sealed class InventoryLedger
         e.Terminal = true;
         e.TerminalEventMs = venueEventMs;
         e.TerminalMonoMicros = nowMonoMicros;
-        if (_lastBalanceEventMs[e.Slot] > venueEventMs)
+        if (_maxLo[e.Slot] > venueEventMs)
         {
+            // an observation the slot holds is as-of after the fill, so the newest delivered state reflects it; the slot's
+            // value is the minimum of what it holds, never above that state
             ReleaseAt(index);
         }
 
@@ -286,49 +318,59 @@ public sealed class InventoryLedger
 
     public bool IsActive(ReservationHandle handle) => TryGet(handle, out _);
 
-    private BalanceUpdate Apply(int slot, decimal venueFree, long venueEventMs, bool ordered)
+    private BalanceUpdate Apply(int slot, decimal venueFree, long lo, long hi, bool ordered)
     {
-        long last = _lastBalanceEventMs[slot];
-        if (venueEventMs < last)
+        if (hi < _maxLo[slot])
         {
-            return BalanceUpdate.Stale; // the slot already reflects a later venue time
+            return BalanceUpdate.Stale; // ends before an observation the slot holds begins: definitely older
         }
 
-        if (venueEventMs == last)
+        if (lo > _maxHi[slot])
         {
-            if (ordered && _orderedAtLast[slot])
+            // begins after everything the slot holds ends: definitely newer → it IS the balance
+            _venueFree[slot] = venueFree;
+            _maxLo[slot] = lo;
+            _maxHi[slot] = hi;
+            _orderedAtLast[slot] = ordered;
+            _balanceConflict[slot] = false;
+            for (int i = 0; i < _entries.Length; i++)
             {
-                _venueFree[slot] = venueFree; // next event of the ordered stream inside the same ms
-                return BalanceUpdate.Applied;
+                ref Entry e = ref _entries[i];
+                if (e.Active && e.Terminal && e.Slot == slot && e.TerminalEventMs < lo)
+                {
+                    ReleaseAt(i);
+                }
             }
 
-            return venueFree == _venueFree[slot] ? BalanceUpdate.Duplicate : Conflict(slot, venueFree);
+            return BalanceUpdate.Applied;
         }
 
-        _venueFree[slot] = venueFree;
-        _lastBalanceEventMs[slot] = venueEventMs;
-        _orderedAtLast[slot] = ordered;
-        _balanceConflict[slot] = false;
-        for (int i = 0; i < _entries.Length; i++)
+        if (ordered && _orderedAtLast[slot])
         {
-            ref Entry e = ref _entries[i];
-            if (e.Active && e.Terminal && e.Slot == slot && e.TerminalEventMs < venueEventMs)
-            {
-                ReleaseAt(i);
-            }
+            // the slot holds exactly one observation, the previous event of the ordered stream, in this same ms
+            _venueFree[slot] = venueFree;
+            return BalanceUpdate.Applied;
         }
 
-        return BalanceUpdate.Applied;
+        return Merge(slot, venueFree, lo, hi);
     }
 
-    private BalanceUpdate Conflict(int slot, decimal venueFree)
+    /// <summary>Ambiguous observation: keep the lower value, widen the slot's bounds, end same-ms ordering.</summary>
+    private BalanceUpdate Merge(int slot, decimal venueFree, long lo, long hi)
     {
+        _maxLo[slot] = Math.Max(_maxLo[slot], lo);
+        _maxHi[slot] = Math.Max(_maxHi[slot], hi);
+        _orderedAtLast[slot] = false; // even an equal value may be newer than the next same-ms stream event (C-09)
+        if (venueFree == _venueFree[slot])
+        {
+            return BalanceUpdate.Duplicate;
+        }
+
         if (venueFree < _venueFree[slot])
         {
             _venueFree[slot] = venueFree;
         }
 
-        _orderedAtLast[slot] = false; // a later same-ms stream event can no longer be ordered against this value
         _balanceConflict[slot] = true;
         return BalanceUpdate.Conflict;
     }

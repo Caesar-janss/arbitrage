@@ -507,6 +507,8 @@ R-06/R-03/R-13/R-01 (reviewer mengonfirmasi reproduksi aslinya kini tertutup). U
   dibuang diam-diam (1); konflik tidak mematikan urutan (2, termasuk model acak berurut).
 - **Belum terbukti (NEEDS-DATA, Tahap 2)**: lag cache REST wallet tiap venue terhadap stream (menentukan batas bawah stamp
   snapshot bila venue tidak memberi waktu as-of).
+- **Dikoreksi di ronde 3 (C-09)**: kontrak host "stamp batas bawah = aman" di entri ini salah, dan fix ini masih punya
+  lubang untuk duplikat tanpa urutan di ms yang sama. Lihat C-09.
 
 ## C-08 (S2) — hedge spatial tidak bisa kembali POSITION_OPEN setelah partial exit
 
@@ -629,4 +631,58 @@ R-06/R-03/R-13/R-01 (reviewer mengonfirmasi reproduksi aslinya kini tertutup). U
 | Mutation | 6 + 3 + 5(+2 jalur cepat) + 4 = 20 mutan non-ekuivalen, semua tertangkap (+1 ekuivalen); 4 test diperketat karena versi pertamanya meloloskan mutan (C-08 SQL, C-02 notional, C-02 band jalur cepat, C-01 suku ulp) dan 1 test diganti karena tidak merah pra-patch (C-01 `PairLotGrid`) |
 | Benchmark | 0 B/op semua; pricer +3–6 % (15–28 ns, cek ulang cap) setelah jalur cepat; lainnya dalam noise |
 | Belum | re-review ChatGPT untuk fix C-07 (S1), persetujuan Jansen → **Tahap 1 tetap REVIEW TERBUKA** |
+
+---
+
+# Ronde 3: re-review ChatGPT (PR #2 review 5732656006 @ `30417db`)
+
+Reviewer menerima fix C-08, C-02, C-01 sesuai lingkupnya; reproduksi asli C-07 tertutup. Dua temuan S1 baru: C-09 dan
+C-10 (C-10 = konfirmasi observasi builder di ronde 2).
+
+## C-09 (S1) — stamp batas bawah snapshot bisa menghidupkan kembali saldo lama
+
+- **MERAH (perilaku, API lama, file scratch tidak di-commit)**: urutan reviewer persis memakai kontrak host yang
+  didokumentasikan C-07 (snapshot tanpa as-of diberi stamp batas bawah), dan model acak dengan snapshot berinterval yang
+  dikirim lewat API titik memakai batas bawahnya:
+  ```
+  FAIL …ReviewerSequence_UnderTheDocumentedLowerBoundContract      Expected: 20  Actual: 100
+  FAIL …IntervalModel_LowerBoundStampedThroughThePointApi
+       seed 2 step 17 (DeliverStream): Available 75 > bound 69 (newest delivered position 3, true value 97)
+  TOTAL: 0 passed, 2 failed
+  ```
+  Test ini tidak di-commit karena cara pemanggilannya (batas bawah lewat API titik) kini terlarang oleh kontrak; dengan
+  kontrak itu ia tetap "merah" setelah fix, sebagai pelanggaran host, bukan bug ledger.
+- **Temuan builder dalam C-09, varian as-of exact** (`Regression/C09_UnorderedDuplicateTests.cs`, API lama): setelah model
+  bersama diubah untuk snapshot berinterval, urutan acaknya bergeser dan model C-07 yang **sudah di-commit** (stream berurut,
+  snapshot as-of exact) gagal di seed 56. Trace: dalam ms 1017 saldo asli 21 → 26 → 31 → 26; stream mengirim 21, 26;
+  snapshot exact keadaan terakhir (26) datang, nilainya sama → `Duplicate`, tetapi slot tetap dianggap "berurut"; event
+  stream tertunda 31 (lebih lama dari snapshot) lalu diterapkan → overstate 5.
+  ```
+  FAIL …UnorderedDuplicate_EndsSameMsOrdering                      Expected: 26  Actual: 31
+  FAIL …ExactModel_OrderedStream_MoreSeeds
+       seed 56 step 106 (DeliverStream): Available 28 > bound 23 (newest delivered position 20, true value 26)
+  TOTAL: 0 passed, 2 failed
+  ```
+  Pelajaran: 1.500 seed model C-07 lulus karena kebetulan urutan acak, bukan karena terbukti. Seed model exact dinaikkan ke
+  5.000, dan coverage guard ditambahkan untuk pola C-09.
+- **MERAH (compile, API baru)**: `Regression/C09_SnapshotIntervalTests.cs` (11): `'InventoryLedger' does not contain a
+  definition for 'OnBalanceSnapshot'`.
+- **Patch** (`InventoryLedger`): setiap observasi punya interval as-of `[lo, hi]` (titik untuk stream / as-of exact;
+  `OnBalanceSnapshot(slot, free, notBefore, notAfter)` untuk REST). Per slot disimpan batas bawah terbesar dan batas atas
+  terbesar yang dipegang. `hi < maxLo` → `Stale`; `lo > maxHi` → `Applied` (pasti lebih baru: hanya jalur ini yang bisa
+  menaikkan saldo, dan rilis fill yang *strictly* sebelum `lo`); event berikutnya dari stream berurut di ms yang sama →
+  `Applied`; selain itu `Merge`: nilai terkecil, interval digabung, urutan dalam 1 ms berakhir (juga untuk nilai yang sama →
+  `Duplicate`). `MarkTerminal` merilis seketika bila `maxLo > waktu fill`. Doc class dan kontrak host dikoreksi.
+- **HIJAU**: `C09_SnapshotIntervalTests 11 passed`, `C09_UnorderedDuplicateTests 2 passed`, `C07_*` 14 passed (model
+  bersama diperluas: snapshot berinterval + coverage pola C-09); full suite `304 passed, 0 failed`.
+- **Mutation** (11 dijalankan, 8 tertangkap di desain akhir): tanpa pelebaran batas atas (3 test, termasuk kedua model
+  interval); duplikat tidak mengakhiri urutan (5); rilis memakai batas atas (3); dominasi non-strict (13); snapshot
+  diperlakukan sebagai titik batas bawah (5); stale tidak pernah (5); merge mengambil nilai masuk (15); `MarkTerminal` tidak
+  pernah rilis saat konflik (1, test liveness). Tiga mutan versi pertama lolos dan dianalisis: memakai batas bawah **terbesar** untuk `MarkTerminal` ternyata aman *dan* lebih
+  live daripada batas bawah terkecil (observasi yang as-of sesudah fill sudah tercermin di state terbaru; nilai slot = minimum
+  yang dipegang). Desain diganti ke varian itu, state `_minLo` dihapus, dan pilihan itu dikunci dengan test liveness. Stale
+  berdasarkan batas bawah terkecil = aman tetapi kurang presisi, kini dikunci test presisi.
+- **Batas (NEEDS-DATA, Tahap 2)**: lag cache REST per venue (menentukan `notBefore`), dan bukti bahwa urutan stream venue
+  benar-benar kausal. Penghitung terima lokal hanya urutan kiriman pada satu koneksi, bukan bukti urutan data venue (catatan
+  reviewer).
 
