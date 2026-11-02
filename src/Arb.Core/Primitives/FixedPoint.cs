@@ -92,12 +92,17 @@ public static class FixedPoint
         }
 
         double x = value / unit;
+        if (!double.IsFinite(x))
+        {
+            throw new OverflowException("grid units out of Int64 range"); // e.g. 1e300 / 1e-300 (B-01)
+        }
+
         double ax = Math.Abs(x);
         double tol = Math.Min(GridEpsilon + (GridUlpTolerance * (Math.BitIncrement(ax) - ax)), MaxGridSnap);
         double r = rounding == Rounding.Down ? Math.Floor(x + tol) : Math.Ceiling(x - tol);
-        if (r >= 9.2e18 || r <= -9.2e18)
+        if (!(r < 9.2e18 && r > -9.2e18))
         {
-            throw new OverflowException("grid units out of Int64 range");
+            throw new OverflowException("grid units out of Int64 range"); // written so that NaN fails too (B-01)
         }
 
         return (long)r;
