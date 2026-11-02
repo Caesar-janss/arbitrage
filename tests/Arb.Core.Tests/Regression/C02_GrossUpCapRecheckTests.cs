@@ -111,6 +111,7 @@ public class C02_GrossUpCapRecheckTests
         var rng = new Random(20261102);
         int executes = 0;
         int capBindingAfterGrossUp = 0;
+        int adversarial = 0;
         for (int iter = 0; iter < 4_000; iter++)
         {
             int nA = rng.Next(1, 5);
@@ -162,8 +163,19 @@ public class C02_GrossUpCapRecheckTests
             }
 
             Assert.Equal(oracle * ctx.Grid.LotsPerUnitB, q.SellLots);
+
+            // Adversarial cap 5e-15 below a notional the pricer can reach: inside the fast path's 1e-12 band, so only the
+            // exact decimal compare can tell that this size no longer fits.
+            SpatialParams tight = p with { MaxBuyNotional = (double)q.BuyNotionalExact * (1 - 5e-15) };
+            SpatialQuote t = SpatialArbPricer.Evaluate(ctx, buy, sell, tight);
+            if (t.IsExecutable)
+            {
+                adversarial++;
+                Assert.True(Fits(ctx, buy, sell, tight, t.SellLots / ctx.Grid.LotsPerUnitB, out _), $"{where}: cap {tight.MaxBuyNotional:R} broken by {t.BuyNotionalExact}");
+            }
         }
 
+        Assert.True(adversarial >= 1_000, $"coverage: only {adversarial} adversarial-cap executes");
         Assert.True(executes >= 1_000, $"coverage: only {executes} executes");
         Assert.True(capBindingAfterGrossUp >= 100, $"coverage: a cap bound after gross-up in only {capBindingAfterGrossUp} cases");
     }

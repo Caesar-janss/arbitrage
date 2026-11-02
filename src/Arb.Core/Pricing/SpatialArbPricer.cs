@@ -283,7 +283,8 @@ public static class SpatialArbPricer
         legs.BuyLots = p.BuyFee.Asset == FeeAssetKind.Base
             ? LotNormalizer.GrossUpBuyLots(legs.SellQtyExact, p.BuyFee.Rate, buy)
             : units * ctx.Grid.LotsPerUnitA;
-        if (caps.HasQty && (buy.CanonicalQtyExact(legs.BuyLots) > caps.Qty || legs.SellQtyExact > caps.Qty))
+        if (caps.HasQty && (FinalCaps.Exceeded(buy.CanonicalQty(legs.BuyLots), buy.CanonicalQtyExact(legs.BuyLots), p.MaxQtyCanon)
+                            || FinalCaps.Exceeded(sell.CanonicalQty(legs.SellLots), legs.SellQtyExact, p.MaxQtyCanon)))
         {
             return false;
         }
@@ -296,32 +297,43 @@ public static class SpatialArbPricer
         }
 
         legs.BuyNotionalExact = legs.BuyFill.NotionalQuoteExact(buy);
-        return !caps.HasNotional || legs.BuyNotionalExact <= caps.Notional;
+        return !caps.HasNotional || !FinalCaps.Exceeded(buy.NotionalQuote(legs.BuyFill.NotionalUnits), legs.BuyNotionalExact, p.MaxBuyNotional);
     }
 
     /// <summary>
-    /// Caps as exact decimals. A configured double converts to its shortest decimal form (600 → 600, 0.01 → 0.01), so an
-    /// order is compared with the number the operator wrote. +∞ (or beyond decimal range) = no cap.
+    /// Exact cap checks. The configured double is compared as its shortest decimal form (600 → 600, 0.01 → 0.01), i.e. the
+    /// number the operator wrote. Fast path: the double estimate (relative error ~1e-15) decides unless it lies within
+    /// 1e-12 of the cap; only then the decimal conversion and exact compare run. +∞ (or beyond decimal range) = no cap.
     /// </summary>
     private readonly struct FinalCaps
     {
         private const double NoCapAbove = 1e27;
+        private const double Band = 1e-12;
 
         public FinalCaps(in SpatialParams p)
         {
             HasQty = p.MaxQtyCanon < NoCapAbove;
-            Qty = HasQty ? (decimal)p.MaxQtyCanon : 0m;
             HasNotional = p.MaxBuyNotional < NoCapAbove;
-            Notional = HasNotional ? (decimal)p.MaxBuyNotional : 0m;
         }
 
         public bool HasQty { get; }
 
-        public decimal Qty { get; }
-
         public bool HasNotional { get; }
 
-        public decimal Notional { get; }
+        public static bool Exceeded(double approx, decimal exact, double cap)
+        {
+            if (approx < cap * (1 - Band))
+            {
+                return false;
+            }
+
+            if (approx > cap * (1 + Band))
+            {
+                return true;
+            }
+
+            return exact > (decimal)cap;
+        }
     }
 
     private struct Legs
