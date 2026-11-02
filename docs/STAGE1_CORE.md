@@ -31,6 +31,7 @@
 | C-07 | dua observasi saldo di ms yang sama tanpa urutan → `Conflict`: simpan nilai **terkecil** + `NeedsReconcile`; stream user dengan nomor urut kirim diurutkan dalam 1 ms | stream: `OnBalance(slot, free, ms, seq)` (seq naik per slot, 1 sumber per slot); REST: stamp = waktu *as-of* venue atau batas bawahnya, **jangan** waktu terima lokal / waktu baru untuk data cache |
 | C-08 | hedge spatial yang di-unwind **sebagian** di kedua kaki kembali `EXITING → POSITION_OPEN` (C# + `V008`); entry `IN_FLIGHT → POSITION_OPEN` tetap ditolak | partial unwind: isi kedua kaki dulu, lalu `TransitionTo(PositionOpen)`; bila perp sudah habis tetapi spot tersisa → `RESIDUAL` (`NotHedged`) |
 | C-02 | kaki final (setelah gross-up fee-base & pembulatan lot) dicek ulang terhadap **semua** cap secara exact (notional, qty kedua kaki, level, kedalaman haircut); bila melanggar → ukuran common terbesar yang muat (binary search), atau reject | – |
+| C-01 | `FixedPoint.ToUnits`: snap = 1e-9 + 16 ulp, maksimum 1e-6 unit; tidak pernah menyeberangi integer | – |
 
 Pure domain library: **zero dependency eksternal, tanpa I/O, deterministik**. Semua kalkulasi & state
 yang menentukan "masuk / tidak / bagaimana memperbaiki" ada di sini dan diuji tanpa API key.
@@ -91,6 +92,12 @@ Test kontrak SQL membaca **semua** `db/migrations/V*.sql` (dicari ke atas dari f
 Setiap konversi kembali ke grid venue memakai arah pembulatan **eksplisit** (`Rounding.Down/Up`).
 Temuan saat verifikasi: `6005000 × 0.999` dalam `double` bisa jatuh 1 tick di bawah. Limit price repair
 sekarang dihitung dengan `decimal`, dan `FixedPoint.ToUnits` memakai toleransi relatif (1e-12·|x|).
+
+**Koreksi (C-01, review ChatGPT):** toleransi relatif 1e-12·|x| itu sendiri salah: di |x| ≈ 1e12 ia mencapai satu unit
+penuh, sehingga `Down` menaikkan integer exact (1e12 → 1e12 + 1) dan `Up` menurunkannya. v0.3+: toleransi = 1e-9 + 16 ulp
+dari x, **dibatasi 1e-6 unit** (`MaxGridSnap`), jadi snap tidak pernah menyeberangi integer dan integer exact tetap di
+semua magnitudo. Di atas ~1e9 unit noise bisa melebihi batas itu; hasilnya `Down` kurang satu unit / `Up` lebih satu unit,
+keduanya arah aman. Field order dan cap keras dicek ulang secara exact oleh pemanggil (C-02).
 
 ### 3.2 OrderBookL2 + seqlock
 - Writer: `Interlocked.Increment` (ganjil, full fence) → mutasi → `Volatile.Write` (genap, release).

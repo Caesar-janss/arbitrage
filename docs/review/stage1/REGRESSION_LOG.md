@@ -577,3 +577,37 @@ R-06/R-03/R-13/R-01 (reviewer mengonfirmasi reproduksi aslinya kini tertutup). U
 - **Benchmark** (harness offline, A/B berurutan, min dari 2 run): `SpatialArbPricer.Evaluate` 465,7 → 449,0 ns/op (dalam
   noise), 0 B/op. Jalur umum tetap satu kali sizing; binary search hanya saat cap terlanggar.
 
+## C-01 (S2) — epsilon relatif `FixedPoint.ToUnits` menyeberangi integer
+
+- **Test**: `Regression/C01_GridSnapBoundTests.cs` (16, API lama): kasus reviewer (1e12, Down dan Up); integer exact sebagai
+  titik tetap dari 1 sampai 1e18 (unit 1 dan 0,25); pecahan asli di bawah/atas integer tidak ditarik (10 … 1e13); noise
+  tetap diserap (0,01/1e-5, 0,1+0,2, 2,9999999999, limit repair 5998995, dan tiga rantai `n·unit·k/k` dengan noise 1–2 ulp
+  di atas band absolut 1e-9, ditemukan dengan pencarian); properti 200.000 nilai acak sampai 1e15 unit (`Down ≤ x + s`,
+  `Up ≥ x − s`, s = 1e-6 + 2 ulp; coverage ≥ 10.000 nilai ≥ 1e12); `PairLotGrid.UnitsFloor` dengan common lot 1e-8 BTC.
+- **MERAH (perilaku, API lama)**:
+  ```
+  FAIL …ReviewerCase_ExactIntegerAt1e12_IsUnchanged                 Expected: 1000000000000  Actual: 1000000000001
+  FAIL …ExactIntegers_AreFixedPoints_AtEveryMagnitude(1e12)          Actual: 1000000000001
+  FAIL …ExactIntegers_AreFixedPoints_AtEveryMagnitude(3e13)          Actual: 30000000000030
+  FAIL …ExactIntegers_AreFixedPoints_AtEveryMagnitude(1e15)          Actual: 1000000000001000
+  FAIL …ExactIntegers_AreFixedPoints_AtEveryMagnitude(2^52)          Actual: 4503599627375000
+  FAIL …ExactIntegers_AreFixedPoints_AtEveryMagnitude(2^53)          Actual: 9007199254750000
+  FAIL …ExactIntegers_AreFixedPoints_AtEveryMagnitude(1e18)          Actual: 1000000000001000064
+  FAIL …GenuineFractionsBelowAnInteger_AreNotPulledUp                Expected: 999999999999  Actual: 1000000000000
+  FAIL …PairLotGrid_UnitsFloor_NeverExceedsTheQuantity               (999.999.999.999,5 lot → 1e12)
+  FAIL …RandomValues_NeverCrossAnIntegerBeyondTheSnapBand
+       Down 1234221350704 > x + snap (value 1234221350703.1597 unit 1 x 1234221350703.1597)
+  TOTAL: 6 passed, 10 failed
+  ```
+  Yang lulus pra-patch: integer kecil (1, 7, 6e6, 999.999.999, 5e11) dan penyerapan noise, sebagai guard agar fix tidak
+  merusak keduanya. Versi pertama test `PairLotGrid` lulus pra-patch karena nilainya tepat di lot; diganti setengah lot
+  di bawah 1e12 → merah.
+- **Patch** (`FixedPoint.ToUnits`): `tol = min(1e-9 + 16·ulp(x), 1e-6)` menggantikan `1e-9 + |x|·1e-12`
+  (`GridRelativeEpsilon` dihapus; `GridUlpTolerance`, `MaxGridSnap` baru). Order quantity spatial dan cap keras sudah dicek
+  ulang secara exact oleh C-02.
+- **HIJAU**: `C01_GridSnapBoundTests 16 passed`; full suite `291 passed, 0 failed` (termasuk `FixedPointTests` 31 dan limit
+  repair 5998995 yang bergantung pada penyerapan noise).
+- **Mutation** (4, semua tertangkap): tanpa batas 1e-6 (5 test); batas 0,5 (properti); toleransi relatif 1e-15 (5);
+  tanpa suku ulp (1, `NoiseIsStillAbsorbed`; **sebelum** tiga rantai noise 1–2 ulp ditambahkan, mutan ini lolos karena
+  semua kasus noise lama sudah diserap band absolut 1e-9).
+

@@ -17,8 +17,20 @@ public static class FixedPoint
     /// <summary>Absolute tolerance (grid units) when snapping a double onto a grid; absorbs FP noise like 2.9999999999.</summary>
     public const double GridEpsilon = 1e-9;
 
-    /// <summary>Relative tolerance added on top (double ulp is ~2e-16·|x|; 1e-12 gives 4 orders of headroom for large unit counts).</summary>
-    public const double GridRelativeEpsilon = 1e-12;
+    /// <summary>
+    /// Noise allowance in ulps of x = value / unit, on top of <see cref="GridEpsilon"/>: a decimal-grid value divided by
+    /// a decimal-grid unit, after a short arithmetic chain, is off by a few ulps (C-01). Replaces the v0.3 relative
+    /// 1e-12·|x|, which reached a whole unit at |x| ≈ 1e12.
+    /// </summary>
+    public const double GridUlpTolerance = 16;
+
+    /// <summary>
+    /// Hard ceiling of the snap (grid units). The tolerance can never cross an integer: a value more than this far from
+    /// the grid is rounded strictly in the requested direction (Down never above x + MaxGridSnap, Up never below
+    /// x − MaxGridSnap). Beyond ~1e9 units the noise can exceed it; then Down may return one unit less and Up one more,
+    /// both the safe side.
+    /// </summary>
+    public const double MaxGridSnap = 1e-6;
 
     private static readonly long[] Pow10Table = BuildPow10();
 
@@ -62,7 +74,11 @@ public static class FixedPoint
         return a;
     }
 
-    /// <summary>Snap a double value onto a grid of size <paramref name="unit"/> with explicit rounding.</summary>
+    /// <summary>
+    /// Snap a double value onto a grid of size <paramref name="unit"/> with explicit rounding. Values within the noise
+    /// band of a grid point (≤ <see cref="MaxGridSnap"/>) snap to it; exact integers are fixed points at every magnitude.
+    /// Anything that becomes a hard cap / order field is re-checked in the exact domain by the caller (C-02).
+    /// </summary>
     public static long ToUnits(double value, double unit, Rounding rounding)
     {
         if (!(unit > 0) || double.IsInfinity(unit))
@@ -76,7 +92,8 @@ public static class FixedPoint
         }
 
         double x = value / unit;
-        double tol = GridEpsilon + (Math.Abs(x) * GridRelativeEpsilon);
+        double ax = Math.Abs(x);
+        double tol = Math.Min(GridEpsilon + (GridUlpTolerance * (Math.BitIncrement(ax) - ax)), MaxGridSnap);
         double r = rounding == Rounding.Down ? Math.Floor(x + tol) : Math.Ceiling(x - tol);
         if (r >= 9.2e18 || r <= -9.2e18)
         {
