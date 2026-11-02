@@ -36,6 +36,10 @@ python3 tools/latency_probe.py --label singapore --minutes 30 --progress      # 
 
 Laporan `--compare` juga menghitung **kaki terlambat** tiap pasangan spatial (maks RTT origin dua venue, p50 dan p99), karena
 jendela legging ditentukan kaki paling lambat (§5).
+RTT origin satu kaki = yang **lebih kecil** antara REST time dan WS ping: keduanya jaringan + waktu proses server, dan
+beberapa venue lambat memproses request WS level aplikasi (run uji Tokyo: Binance `LIST_SUBSCRIPTIONS` 47 ms, padahal TCP
+ke `stream.binance.com` 5 ms dan REST 7 ms). File per jam berlabel `<lokasi>-hNN` digabung jadi satu kolom per lokasi
+(p50 = median p50 per jam, p99 = jam terburuk), plus tabel kaki terlambat per jam untuk melihat pola harian.
 
 ## 3. Cara membaca → opsi §5 (panduan, bukan aturan otomatis)
 
