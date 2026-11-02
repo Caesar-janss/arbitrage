@@ -6,3 +6,14 @@ TestResults/
 .vs/
 .idea/
 review_packets/
+
+# Secrets never enter the repo (TEAM_WORKFLOW §5 rule 5, B-02). Keys live in the VPS env / secret store only.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets*.json
+*.secrets.json
+appsettings.*.local.json
