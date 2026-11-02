@@ -546,11 +546,12 @@ R-06/R-03/R-13/R-01 (reviewer mengonfirmasi reproduksi aslinya kini tertutup). U
 
 ## C-02 (S2) — gross-up fee-base setelah optimizer melewati MaxBuyNotional (dan cap lain)
 
-- **Test**: `Regression/C02_GrossUpCapRecheckTests.cs` (7, API lama): kasus reviewer persis (Bitget → Bybit, lot 1e-6,
+- **Test**: `Regression/C02_GrossUpCapRecheckTests.cs` (6, API lama): kasus reviewer persis (Bitget → Bybit, lot 1e-6,
   cap 600, fee beli 0,1 % base); cap notional saja; cap qty saja; gross-up melewati `MaxLevelsPerSide`; gross-up melewati
   kedalaman haircut; properti 4.000 book acak (setiap Execute memenuhi semua cap pada kaki final **dan** ukurannya maksimal,
   oracle = scan linear turun dari floor optimizer, terpisah dari binary search implementasi; coverage guard ≥ 1.000 execute
-  dan ≥ 100 kasus cap mengikat setelah gross-up).
+  dan ≥ 100 kasus cap mengikat setelah gross-up; fase cap adversarial 5e-15 di bawah notional yang bisa dicapai, ≥ 1.000
+  execute, ditambahkan untuk jalur cepat, lihat bawah).
 - **MERAH (perilaku, API lama)**:
   ```
   FAIL …ReviewerCase_FinalBuyNotional_StaysWithinTheCap         buy notional 600.66000000 > 600
@@ -570,12 +571,18 @@ R-06/R-03/R-13/R-01 (reviewer mengonfirmasi reproduksi aslinya kini tertutup). U
   yang muat (semua cap monoton terhadap ukuran); 0 → `RejectThreshold`. Invariant terdokumentasi di class:
   `IsExecutable ⇒ notional beli ≤ MaxBuyNotional, kedua kaki ≤ MaxQtyCanon, level ≤ MaxLevelsPerSide, walk lengkap`.
   Kasus reviewer kini: deliver 0.00999, beli 0.01 (10.000 lot) seharga tepat 600.
-- **HIJAU**: `C02_GrossUpCapRecheckTests 7 passed`; full suite `275 passed, 0 failed` (zero-alloc pricer tetap 0 B).
+- **HIJAU**: `C02_GrossUpCapRecheckTests 6 passed`; full suite `275 passed, 0 failed` (zero-alloc pricer tetap 0 B).
+  (Pesan commit `397d9c7` menulis "7 green": salah hitung, jumlahnya 6.)
 - **Mutation** (5, semua tertangkap): hapus cek notional (2 test: cap-notional-saja dan properti; **versi pertama hanya
   properti yang menangkap**, karena di kasus reviewer cap qty juga mengikat → test cap-notional-saja ditambahkan); walk tanpa
   batas level (2); hasil search tidak maksimal (2); cap qty hanya di kaki jual (2); reject alih-alih mengecil (6).
-- **Benchmark** (harness offline, A/B berurutan, min dari 2 run): `SpatialArbPricer.Evaluate` 465,7 → 449,0 ns/op (dalam
-  noise), 0 B/op. Jalur umum tetap satu kali sizing; binary search hanya saat cap terlanggar.
+- **Benchmark & jalur cepat** (commit dokumentasi ronde 2): A/B pertama (2 run) tampak netral (465,7 → 449,0), tetapi A/B
+  bergantian 4× terhadap `4bf87f7` dengan build terpisah menunjukkan regresi nyata: min 459,6 → 505,2 ns/op, dari konversi
+  `(decimal)double` cap di setiap evaluasi. Perbaikan: estimasi double (error relatif ~1e-15) memutuskan kecuali berada dalam
+  1e-12 dari cap; hanya di band itu konversi decimal + perbandingan exact dijalankan. Hasil 4× bergantian: min 457,3 → 485,0,
+  median 484,4 → 498,4 ns/op (+3–6 %, ~15–28 ns = biaya cek ulang), 0 B/op. Mutan jalur cepat: "band → selalu terlanggar"
+  tertangkap (3 test); "band → selalu muat" **lolos** sampai fase cap adversarial ditambahkan ke properti, kini tertangkap;
+  "band atas dilebarkan" = mutan ekuivalen (hanya lebih banyak kasus ke jalur exact, hasil sama).
 
 ## C-01 (S2) — epsilon relatif `FixedPoint.ToUnits` menyeberangi integer
 
@@ -610,4 +617,16 @@ R-06/R-03/R-13/R-01 (reviewer mengonfirmasi reproduksi aslinya kini tertutup). U
 - **Mutation** (4, semua tertangkap): tanpa batas 1e-6 (5 test); batas 0,5 (properti); toleransi relatif 1e-15 (5);
   tanpa suku ulp (1, `NoiseIsStillAbsorbed`; **sebelum** tiga rantai noise 1–2 ulp ditambahkan, mutan ini lolos karena
   semua kasus noise lama sudah diserap band absolut 1e-9).
+
+## Ringkasan ronde 2 (review ChatGPT)
+
+| | Jumlah |
+|---|---|
+| Temuan baru ChatGPT | 4 CONFIRMED (C-07 S1; C-01, C-02, C-08 S2), 0 REJECTED; C-03…C-06 DUPLICATE |
+| Merah dicatat sebelum patch | 4/4, semuanya **perilaku pada API lama** (C-07 juga compile-merah untuk API baru) |
+| Test C# | 250 → **291** (harness offline 291/291) |
+| DB | `ALL TESTS PASSED`, assertion 118 → **124** (blok ronde 2 di-rollback) |
+| Mutation | 6 + 3 + 5(+2 jalur cepat) + 4 = 20 mutan non-ekuivalen, semua tertangkap (+1 ekuivalen); 4 test diperketat karena versi pertamanya meloloskan mutan (C-08 SQL, C-02 notional, C-02 band jalur cepat, C-01 suku ulp) dan 1 test diganti karena tidak merah pra-patch (C-01 `PairLotGrid`) |
+| Benchmark | 0 B/op semua; pricer +3–6 % (15–28 ns, cek ulang cap) setelah jalur cepat; lainnya dalam noise |
+| Belum | re-review ChatGPT untuk fix C-07 (S1), persetujuan Jansen → **Tahap 1 tetap REVIEW TERBUKA** |
 
