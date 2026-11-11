@@ -35,6 +35,17 @@ import md_recorder as md  # noqa: E402
 
 BINANCE_LISTED = {"BTCUSDT": "TRADING", "ETHUSDT": "TRADING", "OLDUSDT": "BREAK", "ONLYBGUSDT": None}
 BITGET_LISTED = {"BTCUSDT": "online", "ETHUSDT": "online", "OLDUSDT": "online", "ONLYBNUSDT": None, "HALTUSDT": "halt"}
+# C-13: answers that do NOT prove a symbol is unlisted (status, body); body None = non-JSON
+BITGET_ODD = {
+    "NONJSONUSDT": (400, None),
+    "SYSERRUSDT": (400, {"code": "40015", "msg": "System is abnormal, please try again later"}),
+    "ENVERRUSDT": (200, {"code": "40015", "data": []}),
+    "PARAMUSDT": (400, {"code": "40034", "msg": "Parameter does not exist"}),
+}
+BINANCE_ODD = {
+    "WRONGROWUSDT": (200, {"symbols": [{"symbol": "OTHERUSDT", "status": "BREAK"}]}),
+    "B400USDT": (400, {"code": -1100, "msg": "Illegal characters found in a parameter."}),
+}
 
 
 def _frame(opcode: int, payload: bytes, fin: bool = True) -> bytes:
@@ -97,6 +108,7 @@ class MockVenues:
         self.binance_pongs: list[bytes] = []
         self.bitget_pings: list[float] = []
         self.bitget_subs: list[dict] = []
+        self.bitget_sub_ns: list[int] = []
         self.ws_sessions = {"binance": 0, "bitget": 0}
 
     def stop(self):
@@ -160,14 +172,15 @@ class MockVenues:
         q = urllib.parse.parse_qs(url.query)
         sym = q.get("symbol", [""])[0]
         if url.path == "/api/v3/exchangeInfo":
-            st = BINANCE_LISTED.get(sym)
-            status, body = (200, {"symbols": [{"symbol": sym, "status": st}]}) if st else (400, {"code": -1121, "msg": "Invalid symbol."})
+            st = BINANCE_LISTED.get(sym, "TRADING" if sym in BITGET_ODD else None)
+            status, body = BINANCE_ODD.get(sym) or ((200, {"symbols": [{"symbol": sym, "status": st}]}) if st else (400, {"code": -1121, "msg": "Invalid symbol."}))
         elif url.path == "/api/v2/spot/public/symbols":
-            st = BITGET_LISTED.get(sym)
-            status, body = (200, {"code": "00000", "data": [{"symbol": sym, "status": st}]}) if st else (400, {"code": "40034", "msg": "Parameter does not exist"})
+            st = BITGET_LISTED.get(sym, "online" if sym in BINANCE_ODD else None)
+            # unknown symbol: authoritative success with no row (C-13: the only answer that may DROP a symbol)
+            status, body = BITGET_ODD.get(sym) or ((200, {"code": "00000", "data": [{"symbol": sym, "status": st}]}) if st else (200, {"code": "00000", "data": []}))
         else:
             status, body = 404, {}
-        data = json.dumps(body).encode()
+        data = b"<html>bad gateway</html>" if body is None else json.dumps(body).encode()
         c.sendall(f"HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {len(data)}\r\nConnection: close\r\n\r\n".encode() + data)
 
     def _binance(self, c, buf, streams):
@@ -222,6 +235,7 @@ class MockVenues:
                     c.sendall(_frame(0x1, b"pong"))
                     continue
                 req = json.loads(text)
+                self.bitget_sub_ns.append(time.time_ns())
                 for arg in req["args"]:
                     self.bitget_subs.append(arg)
                     if arg["instId"] == "BADUSDT":
@@ -290,7 +304,8 @@ class RecorderTests(unittest.TestCase):
         self._when(until, stop.set, timeout)
         kw.setdefault("free_bytes", lambda p: 10**12)
         kw.setdefault("status_s", 0.5)
-        return md.record(specs, self.out, self.ctx, stop, poll_s=0.02, flush_s=0.05, log=self.logs.append, **kw)
+        kw.setdefault("flush_s", 0.05)
+        return md.record(specs, self.out, self.ctx, stop, poll_s=0.02, log=self.logs.append, **kw)
 
     def _conn(self, conn: str) -> dict:
         d = os.path.join(self.out, conn)
@@ -366,6 +381,25 @@ class RecorderTests(unittest.TestCase):
         self.assertGreaterEqual(rep["sessions"], 2)
         self.assertTrue(any("no market data" in r for r in rep["reasons"]))
 
+    def test_b05_an_unexpected_exception_does_not_kill_the_connection_thread(self):
+        # Found while fixing C-12 (a name clash raised TypeError inside the session): only network/protocol errors
+        # were caught, so any other exception ended the thread for good while the process, and systemd, stayed happy.
+        self.mock.reset()
+        real, calls = md.classify, {"n": 0}
+
+        def flaky(venue, text):
+            calls["n"] += 1
+            if calls["n"] == 5:
+                raise RuntimeError("simulated bug")
+            return real(venue, text)
+        md.classify = flaky
+        self.addCleanup(setattr, md, "classify", real)
+        self._record(self._specs()[:1], lambda: self._conn("binance-0")["sessions"] >= 2 and self._data_lines("binance-0") > 20)
+        rep = md.verify_conn(os.path.join(self.out, "binance-0"))
+        self.assertGreaterEqual(rep["sessions"], 2)
+        self.assertTrue(any("simulated bug" in r for r in rep["reasons"]))
+        self.assertTrue(any("RuntimeError" in l for l in self.logs))
+
     def test_disk_guard_stops_cleanly_with_exit_code(self):
         self.mock.reset()
         free = {"n": 10**12}
@@ -385,7 +419,59 @@ class RecorderTests(unittest.TestCase):
         self.assertIn("binance-0 UP", status[-1])
         self.assertIn("GB/day", status[-1])
 
+    def test_c12_subscribe_acks_are_read_while_later_subscribes_wait(self):
+        # Bitget subscribe requests go out 0.15 s apart. The ack of the first must be read (and stamped) during that
+        # wait, not after it: before the fix the thread slept and every byte that arrived meanwhile got a late stamp.
+        self.mock.reset()
+        spec = md.bitget_specs(["BTCUSDT", "ETHUSDT"], "127.0.0.1", self.mock.port, per_msg=3)[0]
+        self.assertEqual(len(spec.subscribe), 2)
+        def acks():
+            d = os.path.join(self.out, "bitget-0")
+            return [ns for f in (sorted(os.listdir(d), key=md._file_key) if os.path.isdir(d) else [])
+                    for ns, p in md.read_file(os.path.join(d, f)) if md.classify("bitget", p)[0] == "ack"]
+        self._record([spec], lambda: len(acks()) >= 6)
+        acks = acks()
+        self.assertEqual(len(acks), 6)
+        late_ms = (acks[0] - self.mock.bitget_sub_ns[0]) / 1e6        # mock answers the instant a request arrives
+        self.assertLess(late_ms, 75, f"first ack stamped {late_ms:.0f} ms after it was sent")   # before fix: ~150
+
+    def test_c12_reader_lag_is_measured_and_reported(self):
+        self.mock.reset()
+        self._record(self._specs()[:1], lambda: self._stats_lines("binance-0") >= 2, stats_s=0.3)
+        rep = md.verify_conn(os.path.join(self.out, "binance-0"))
+        self.assertGreater(rep["reader"]["reads"], 0)
+        self.assertGreaterEqual(rep["reader"]["batch_max"], 1)
+        self.assertIsNotNone(rep["reader"]["lag_p99_us"])
+        self.assertIn("Reader lag", md.verify([self.out])[0])
+
+    def _stats_lines(self, conn: str) -> int:
+        d = os.path.join(self.out, conn)
+        if not os.path.isdir(d):
+            return 0
+        return sum(1 for f in os.listdir(d) for _, p in md.read_file(os.path.join(d, f)) if p.startswith('#{"ev":"stats"'))
+
+    def test_c14_an_idle_feed_is_still_flushed_on_time(self):
+        # 10 messages, then silence. With flush only on the next write, the tail stayed in the compressor.
+        self.mock.reset(silent_after=10)
+        seen = {"n": 0}
+
+        def ten_visible():
+            seen["n"] = self._data_lines("binance-0")
+            return seen["n"] >= 10
+        self._record(self._specs()[:1], ten_visible, timeout=4.0, flush_s=0.3)
+        self.assertGreaterEqual(seen["n"], 10, "tail of an idle feed never reached the file while running")
+
     # ── preflight ───────────────────────────────────────────────────────────────────────────────────────────────
+    def test_c13_preflight_drops_only_on_an_authoritative_answer(self):
+        logs = []
+        odd = list(BITGET_ODD) + list(BINANCE_ODD)
+        keep = md.preflight(["BTCUSDT", "ONLYBNUSDT"] + odd, self.ctx, binance=("127.0.0.1", self.mock.port),
+                            bitget=("127.0.0.1", self.mock.port), log=logs.append)
+        self.assertEqual(keep, ["BTCUSDT"] + odd)                 # transient / unknown answers never drop a symbol
+        self.assertTrue(any("ONLYBNUSDT" in l and "DROP" in l for l in logs))
+        for s in odd:
+            self.assertTrue(any(s in l and "not checked" in l for l in logs), s)
+
     def test_preflight_keeps_only_symbols_trading_on_both(self):
         logs = []
         keep = md.preflight(["BTCUSDT", "ETHUSDT", "OLDUSDT", "ONLYBGUSDT", "ONLYBNUSDT", "HALTUSDT"], self.ctx,
@@ -438,9 +524,100 @@ class PollingWsUnitTests(unittest.TestCase):
     def test_close_frame_raises_with_code(self):
         ws, peer = self._pair()
         peer.sendall(_frame(0x1, b"last") + _frame(0x8, struct.pack("!H", 1008) + b"policy"))
+        got = []
         with self.assertRaises(lp.WsError) as e:
-            ws.poll(0.1)
+            for _ in range(5):
+                got += ws.poll(0.1)
         self.assertIn("1008", str(e.exception))
+        self.assertEqual(got, ["last"])                          # C-11: delivered before the close is reported
+
+    def test_c11_messages_before_a_close_in_the_same_read_are_delivered(self):
+        ws, peer = self._pair()
+        peer.sendall(_frame(0x1, b"A") + _frame(0x1, b"B") + _frame(0x8, struct.pack("!H", 1000)) + _frame(0x1, b"after"))
+        got = []
+        with self.assertRaises(lp.WsError) as e:
+            for _ in range(5):
+                got += ws.poll(0.1)
+        self.assertEqual(got, ["A", "B"])                        # nothing after the close frame is a message
+        self.assertIn("1000", str(e.exception))
+
+    def test_c11_a_failed_pong_does_not_lose_complete_messages(self):
+        ws, peer = self._pair()
+
+        def send_times_out(op, payload):
+            raise socket.timeout("send timed out")
+        ws._send_frame = send_times_out
+        peer.sendall(_frame(0x1, b"A") + _frame(0x9, b"p") + _frame(0x1, b"B"))
+        got = []
+        with self.assertRaises(OSError):
+            for _ in range(5):
+                got += ws.poll(0.1)
+        self.assertEqual(got, ["A", "B"])
+
+    def test_c11_bytes_from_the_handshake_are_delivered_even_if_the_peer_then_closes(self):
+        ws, peer = self._pair()
+        ws._rbuf = bytearray(_frame(0x1, b"early"))              # arrived together with the 101 response
+        peer.close()
+        got = []
+        with self.assertRaises(lp.WsError):
+            for _ in range(3):
+                got += ws.poll(0.5)
+        self.assertEqual(got, ["early"])
+
+    def test_c11_unbounded_fragment_stream_is_refused(self):
+        ws, peer = self._pair()
+        old = md.MAX_FRAME
+        md.MAX_FRAME = 1000
+        self.addCleanup(setattr, md, "MAX_FRAME", old)
+        peer.sendall(_frame(0x1, b"x" * 600, fin=False) + _frame(0x0, b"x" * 600, fin=False))
+        with self.assertRaises(lp.WsError):
+            for _ in range(5):
+                ws.poll(0.1)
+
+    def test_c12_slow_writing_does_not_move_the_stamps(self):
+        # The stamp is the read time. Writing a batch slowly must not spread its messages over the writing time.
+        class SlowWriter:
+            def __init__(self):
+                self.rows = []
+
+            def write(self, ns, payload):
+                time.sleep(0.02)
+                self.rows.append((ns, payload))
+
+            def meta(self, *a, **k):
+                pass
+        w = SlowWriter()
+        rec = md.ConnRecorder(md.ConnSpec("binance-0", "binance", "x", 0, "/", []), w, None, threading.Event())
+        t0 = time.time_ns()
+        rec._deliver([(t0, '{"stream":"a@trade","data":{}}'), (t0, '{"stream":"b@trade","data":{}}'),
+                      (t0 + 5, '{"stream":"c@trade","data":{}}')])
+        self.assertEqual([ns for ns, _ in w.rows], [t0, t0, t0 + 5])
+        self.assertEqual(rec._st_reads, [2, 1])                  # two reads: 2 messages, then 1
+        self.assertGreaterEqual(rec._st_lag[0], 50_000)          # µs: the ~60 ms spent writing is measured as lag
+
+    def test_c12_a_frame_already_buffered_is_returned_without_waiting(self):
+        ws, peer = self._pair()
+        ws._rbuf = bytearray(_frame(0x1, b"early"))
+        t = time.monotonic()
+        got = ws.poll(0.5)
+        self.assertEqual(got, ["early"])
+        self.assertLess(time.monotonic() - t, 0.1)               # 98901fb-era code waited the full 0.5 s
+
+    def test_c12_each_message_is_stamped_at_the_read_that_completed_it(self):
+        ws, peer = self._pair()
+        b = _frame(0x1, b"B")
+        peer.sendall(_frame(0x1, b"A") + b[:2])                 # A complete, B only its header
+        first = ws.poll_stamped(0.5)
+        time.sleep(0.05)
+        peer.sendall(b[2:])
+        second = ws.poll_stamped(0.5)
+        self.assertEqual([m for _, m in first], ["A"])
+        self.assertEqual([m for _, m in second], ["B"])
+        self.assertGreaterEqual(second[0][0] - first[0][0], 40_000_000)
+        before = time.time_ns()
+        peer.sendall(_frame(0x1, b"C"))
+        (ns, m), = ws.poll_stamped(0.5)
+        self.assertTrue(before <= ns <= time.time_ns())
 
     def test_peer_eof_raises(self):
         ws, peer = self._pair()
@@ -518,6 +695,36 @@ class FileAndParseTests(unittest.TestCase):
         self.assertEqual(rep["truncated"], 1)
         w._gz = None                                               # the writer's file was replaced underneath it
         w._raw.close()
+
+    def test_c14_flush_is_due_by_time_not_by_the_next_write(self):
+        now = {"t": 100.0}
+        w = md.HourlyWriter(self.dir, "c", flush_s=5.0, clock=lambda: now["t"])
+        w.write(10**18, "checkpoint")                              # first write flushes (nothing flushed yet)
+        now["t"] = 101.0
+        w.write(10**18 + 1, "pending")                             # not yet due
+        now["t"] = 106.5
+        w.flush_if_due()                                           # no new write: the timer alone must flush
+        got = [p for _, p in md.read_file(w.path) if not p.startswith("#")]
+        self.assertEqual(got, ["checkpoint", "pending"])
+        w.close()
+
+    def test_c14_a_busy_feed_is_fsynced_every_interval_too(self):
+        synced = []
+        real = os.fsync
+        os.fsync = lambda fd: synced.append(fd)
+        self.addCleanup(setattr, os, "fsync", real)
+        now = {"t": 100.0}
+        w = md.HourlyWriter(self.dir, "c", flush_s=5.0, clock=lambda: now["t"])
+        w.write(10**18, "a")                                       # flushed by the write itself
+        now["t"] = 101.0
+        w.flush_if_due()
+        self.assertEqual(len(synced), 1)                           # flushed data reaches the disk at the next tick
+        for t in (103.0, 105.5, 107.0):                            # busy: writes keep flushing, never "idle"
+            now["t"] = t
+            w.write(10**18 + int(t), "b")
+            w.flush_if_due()
+        self.assertEqual(len(synced), 2)                           # 106+: second fsync, despite constant writes
+        w.close()
 
     def test_newlines_inside_a_message_cannot_break_the_line_format(self):
         w = md.HourlyWriter(self.dir, "c", flush_s=0)

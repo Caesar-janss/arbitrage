@@ -47,6 +47,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.parse
 import zlib
 from collections import Counter
@@ -75,38 +76,72 @@ def utc(ns: int) -> str:
 # ── WebSocket reader that never loses bytes on a timeout ─────────────────────────────────────────────────────────────
 class PollingWs(lp.WsClient):
     """
-    poll(timeout) returns the complete text messages that arrived, or [] after the timeout. Unlike WsClient.recv_text,
-    a frame is consumed only once ALL of it is buffered, so a timeout in the middle of a frame loses nothing (the
-    recorder must wake up regularly to send Bitget's keepalive and to notice a silent connection). Server pings are
-    answered with a pong carrying the same payload; fragments are reassembled, also across interleaved control frames.
+    poll(timeout) returns the complete text messages that arrived, or [] after the timeout. poll_stamped(timeout) returns
+    them as (recv_unix_ns, text), stamped right after the socket read that delivered the message's last byte, BEFORE any
+    processing. Messages completed by the same read share a stamp: their order is known, their spacing is not.
+
+    Rules (review C-11 / C-12):
+    - A frame is consumed only once all of it is buffered, so a timeout in the middle of a frame loses nothing (the
+      recorder wakes up regularly to send Bitget's keepalive and to notice a silent connection).
+    - Every complete message is delivered before a close frame, a failed pong, EOF or a protocol error is reported: the
+      error is raised by the NEXT call, once. Bytes after a close frame are not messages and are discarded.
+    - Complete frames already buffered (e.g. sent together with the handshake response) are returned without waiting.
+    Server pings are answered with a pong carrying the same payload; fragments are reassembled, also across interleaved
+    control frames; a message (all its fragments) larger than MAX_FRAME is refused.
     """
 
     def connect(self) -> None:
         super().connect()
         self._rbuf = bytearray(self._buf)        # bytes that arrived together with the handshake response
+        self._rbuf_ns = time.time_ns()
         self._buf = b""
         self._frag: list[bytes] = []
 
     def poll(self, timeout: float) -> list[str]:
+        return [m for _, m in self.poll_stamped(timeout)]
+
+    def poll_stamped(self, timeout: float) -> list[tuple[int, str]]:
+        self._raise_pending()
+        out = self._drain(getattr(self, "_rbuf_ns", None) or time.time_ns()) if self._rbuf else []
+        self._rbuf_ns = None
+        if out or self._pending():
+            return self._finish(out)
         self.sock.settimeout(timeout)
         try:
             chunk = self.sock.recv(1 << 18)
         except (socket.timeout, ssl.SSLWantReadError):
-            chunk = None
-        else:
-            if not chunk:
-                raise lp.WsError("connection closed by peer")
-        if chunk:
+            return out
+        except (OSError, ssl.SSLError) as e:
+            self._error = e
+            return self._finish(out)
+        if not chunk:
+            self._error = lp.WsError("connection closed by peer")
+            return self._finish(out)
+        while chunk:
+            ns = time.time_ns()                   # the stamp: right after the read, before any parsing or writing
             self._rbuf += chunk
+            out += self._drain(ns)
             pending = getattr(self.sock, "pending", None)
-            while pending and pending():          # TLS bytes already decrypted: take them without waiting
-                self._rbuf += self.sock.recv(pending())
-        return self._drain()
+            chunk = self.sock.recv(pending()) if pending and pending() and not getattr(self, "_closed", False) else b""
+        return self._finish(out)
 
-    def _drain(self) -> list[str]:
+    def _pending(self) -> bool:
+        return getattr(self, "_error", None) is not None
+
+    def _raise_pending(self) -> None:
+        if self._pending():
+            e, self._error = self._error, None
+            raise e
+
+    def _finish(self, out: list) -> list:
+        if not out:
+            self._raise_pending()
+        return out
+
+    def _drain(self, ns: int) -> list[tuple[int, str]]:
         b, i, out = self._rbuf, 0, []
         try:
-            while len(b) - i >= 2:
+            while len(b) - i >= 2 and not getattr(self, "_closed", False):
                 b0, b1 = b[i], b[i + 1]
                 n, h = b1 & 0x7F, 2
                 if n == 126:
@@ -118,7 +153,9 @@ class PollingWs(lp.WsClient):
                         break
                     n, h = int.from_bytes(b[i + 2:i + 10], "big"), 10
                 if n > MAX_FRAME:
-                    raise lp.WsError(f"frame of {n} bytes")
+                    self._error, self._closed = lp.WsError(f"frame of {n} bytes"), True
+                    i = len(b)
+                    break
                 mask = None
                 if b1 & 0x80:
                     if len(b) - i < h + 4:
@@ -132,18 +169,26 @@ class PollingWs(lp.WsClient):
                     payload = bytes(x ^ mask[k % 4] for k, x in enumerate(payload))
                 op, fin = b0 & 0x0F, b0 & 0x80
                 if op == 0x9:
-                    self._send_frame(0xA, payload)
+                    try:
+                        self._send_frame(0xA, payload)
+                    except (OSError, ssl.SSLError) as e:    # keep delivering what already arrived; report after
+                        self._error = getattr(self, "_error", None) or e
                 elif op == 0xA:
                     pass
                 elif op == 0x8:
                     code = int.from_bytes(payload[:2], "big") if len(payload) >= 2 else None
-                    raise lp.WsError(f"server closed: code {code} {payload[2:80]!r}")
+                    self._error, self._closed = lp.WsError(f"server closed: code {code} {payload[2:80]!r}"), True
+                    i = len(b)                              # anything after a close frame is not a message
                 elif op in (0x1, 0x2, 0x0):
                     if op != 0x0:
                         self._frag = []
                     self._frag.append(payload)
-                    if fin:
-                        out.append(b"".join(self._frag).decode("utf-8", "replace"))
+                    if sum(len(f) for f in self._frag) > MAX_FRAME:
+                        self._error, self._closed = lp.WsError(f"fragmented message over {MAX_FRAME} bytes"), True
+                        self._frag = []
+                        i = len(b)
+                    elif fin:
+                        out.append((ns, b"".join(self._frag).decode("utf-8", "replace")))
                         self._frag = []
         finally:
             del b[:i]
@@ -230,10 +275,20 @@ def classify(venue: str, text: str) -> tuple[str, Optional[str]]:
 
 # ── output: one gzip file per connection per UTC hour ──────────────────────────────────────────────────────────────
 class HourlyWriter:
-    def __init__(self, root: str, conn: str, flush_s: float = 5.0, level: int = 6, header: Callable[[], dict] = dict):
+    """
+    Durability (review C-14): written lines reach the OS at least every flush_s seconds, also when the feed is idle
+    (flush_if_due, called by record() every tick), and are fsync'ed right after. A process crash loses at most the last
+    ~flush_s seconds; a VM/host crash at most ~flush_s plus the fsync in flight. Rotation fsyncs the closed file.
+    """
+
+    def __init__(self, root: str, conn: str, flush_s: float = 5.0, level: int = 6, header: Callable[[], dict] = dict,
+                 clock: Callable[[], float] = time.monotonic):
         self.dir = os.path.join(root, conn)
         os.makedirs(self.dir, exist_ok=True)
-        self.flush_s, self.level, self.header = flush_s, level, header
+        self.flush_s, self.level, self.header, self.clock = flush_s, level, header, clock
+        self._dirty = False
+        self._unsynced = False
+        self._last_sync = 0.0
         self._lock = threading.Lock()
         self._hour: Optional[int] = None
         self._raw = None
@@ -259,10 +314,29 @@ class HourlyWriter:
         if "\n" in payload or "\r" in payload:          # JSON whitespace only; keeps one message per line
             payload = payload.replace("\r", " ").replace("\n", " ")
         self._gz.write(f"{ns}\t{payload}\n".encode())
-        now = time.monotonic()
+        self._dirty = True
+        now = self.clock()
         if now - self._last_flush >= self.flush_s:
             self._gz.flush()                            # Z_SYNC_FLUSH: everything so far is readable after a crash
-            self._last_flush = now
+            self._last_flush, self._dirty, self._unsynced = now, False, True
+
+    def flush_if_due(self) -> None:
+        """Timer side of the flush: an idle feed must not keep its tail in the compressor (C-14)."""
+        fd = None
+        with self._lock:
+            if not self._gz:
+                return
+            now = self.clock()
+            if self._dirty and now - self._last_flush >= self.flush_s:
+                self._gz.flush()
+                self._last_flush, self._dirty, self._unsynced = now, False, True
+            if self._unsynced and now - self._last_sync >= self.flush_s:
+                fd, self._last_sync, self._unsynced = self._raw.fileno(), now, False
+        if fd is not None:
+            try:
+                os.fsync(fd)                            # outside the lock: the reader thread never waits on the disk
+            except OSError:
+                pass                                    # file rotated/closed meanwhile: rotation fsynced it
 
     def write(self, ns: int, payload: str) -> None:
         with self._lock:
@@ -281,6 +355,11 @@ class HourlyWriter:
         if self._gz:
             self._gz.close()
             self.closed_bytes += self._raw.tell()
+            self._raw.flush()
+            try:
+                os.fsync(self._raw.fileno())
+            except OSError:
+                pass
             self._raw.close()
         self._gz = self._raw = None
 
@@ -294,10 +373,14 @@ class HourlyWriter:
 class ConnRecorder(threading.Thread):
     def __init__(self, spec: ConnSpec, writer: HourlyWriter, ctx: ssl.SSLContext, stop: threading.Event,
                  stale_s: float = 30.0, timeout: float = 10.0, backoff: tuple[float, float] = (1.0, 60.0),
-                 poll_s: float = 0.5, log: Callable[[str], None] = print):
+                 poll_s: float = 0.5, log: Callable[[str], None] = print, stats_s: float = 60.0):
         super().__init__(name=spec.name, daemon=True)
         self.spec, self.writer, self.ctx, self.stop = spec, writer, ctx, stop
         self.stale_s, self.timeout, self.backoff, self.poll_s, self.log = stale_s, timeout, backoff, poll_s, log
+        self.stats_s = stats_s
+        self._st_reads: list[int] = []       # messages per socket read
+        self._st_lag: list[int] = []         # µs from a poll's first read stamp to the end of writing that poll's batch
+        self._st_t0 = time.monotonic()
         self.connected = False
         self.sessions = 0
         self.msgs = 0
@@ -319,6 +402,9 @@ class ConnRecorder(threading.Thread):
                     reason = f"{type(e).__name__}: {e}"[:300]
                 except _Stale as e:
                     reason = str(e)
+                except Exception as e:                      # a bug must cost a reconnect, never the whole feed (B-05)
+                    reason = f"unexpected {type(e).__name__}: {e}"[:300]
+                    self.log(f"{self.spec.name}: {reason}\n" + traceback.format_exc(limit=6))
                 finally:
                     if self.connected:
                         self.connected = False
@@ -345,17 +431,14 @@ class ConnRecorder(threading.Thread):
                              session=self.sessions)
             for i, sub in enumerate(self.spec.subscribe):
                 if i:
-                    time.sleep(0.15)
+                    self._pump(ws, 0.15)                    # keep reading (and stamping) while pacing requests
                 ws.send_text(sub)
             last_data = last_ka = time.monotonic()
             while not self.stop.is_set():
-                msgs = ws.poll(self.poll_s)
+                batch = ws.poll_stamped(self.poll_s)
                 now = time.monotonic()
-                if msgs:
-                    ns = time.time_ns()
-                    for text in msgs:
-                        if self._on_text(ns, text):
-                            last_data = now
+                if batch and self._deliver(batch):
+                    last_data = now
                 if self.spec.keepalive and now - last_ka >= self.spec.keepalive_s:
                     ws.send_text(self.spec.keepalive)
                     last_ka = now
@@ -363,6 +446,43 @@ class ConnRecorder(threading.Thread):
                     raise _Stale(f"no market data for {self.stale_s:.0f} s")
         finally:
             ws.close()
+
+    def _pump(self, ws: PollingWs, seconds: float) -> None:
+        end = time.monotonic() + seconds
+        while not self.stop.is_set():
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            batch = ws.poll_stamped(left)
+            if batch:
+                self._deliver(batch)
+
+    def _deliver(self, batch: list[tuple[int, str]]) -> bool:
+        """Write one poll's messages with their read stamps; measure how long that held up the next read (C-12)."""
+        data = False
+        for ns, text in batch:
+            if self._on_text(ns, text):
+                data = True
+        self._st_lag.append((time.time_ns() - batch[0][0]) // 1000)
+        run, prev = 0, batch[0][0]
+        for ns, _ in batch:
+            if ns != prev:
+                self._st_reads.append(run)
+                run, prev = 0, ns
+            run += 1
+        self._st_reads.append(run)
+        if time.monotonic() - self._st_t0 >= self.stats_s:
+            self._write_stats()
+        return data
+
+    def _write_stats(self) -> None:
+        reads, lag = sorted(self._st_reads), sorted(self._st_lag)
+        if reads:
+            pick = lambda xs, q: xs[min(len(xs) - 1, max(0, -(-len(xs) * q // 100) - 1))]  # noqa: E731 nearest rank
+            self.writer.meta(time.time_ns(), "stats", s=round(time.monotonic() - self._st_t0, 1), reads=len(reads),
+                             msgs=sum(reads), batch_p99=pick(reads, 99), batch_max=reads[-1], lag_p50_us=pick(lag, 50),
+                             lag_p99_us=pick(lag, 99), lag_max_us=lag[-1])
+        self._st_reads, self._st_lag, self._st_t0 = [], [], time.monotonic()
 
     def _on_text(self, ns: int, text: str) -> bool:
         kind, key = classify(self.spec.venue, text)
@@ -402,37 +522,44 @@ def _get_json(host: str, port: int, path: str, ctx: ssl.SSLContext, timeout: flo
 def preflight(symbols: list[str], ctx: ssl.SSLContext, binance=("api.binance.com", 443), bitget=("api.bitget.com", 443),
               timeout: float = 5.0, log: Callable[[str], None] = print) -> list[str]:
     """
-    Keep a symbol only if Binance says TRADING and Bitget says online. A venue that cannot be asked (network error,
-    unexpected answer) does not drop anything: the recorder's silent-stream warning is the second line of defence.
+    Keep a symbol unless a venue gives an AUTHORITATIVE answer that it does not trade (review C-13):
+      Binance  200 with this symbol's row and status != TRADING, or 400 with code -1121 ("Invalid symbol.")
+      Bitget   200 with code "00000" and a data list that has no row for this symbol, or whose row status != "online"
+    Everything else (network error, 5xx/429, non-JSON, other error codes, an answer about another symbol, a missing
+    status) is "not checked" and keeps the symbol: a transient error must never shrink the recorded universe. The
+    recorder's silent-stream warning and --verify are the second line of defence.
     """
     keep = []
     for s in symbols:
         verdicts = []
         try:
             st, j = _get_json(*binance, f"/api/v3/exchangeInfo?symbol={urllib.parse.quote(s)}", ctx, timeout)
-            if st == 400 and isinstance(j, dict) and j.get("code") == -1121:      # "Invalid symbol."
+            rows = j.get("symbols") if isinstance(j, dict) else None
+            row = next((r for r in rows if isinstance(r, dict) and r.get("symbol") == s), None) if isinstance(rows, list) else None
+            if st == 200 and row is not None and isinstance(row.get("status"), str):
+                if row["status"] != "TRADING":
+                    verdicts.append(f"Binance: status {row['status']}")
+            elif st == 400 and isinstance(j, dict) and j.get("code") == -1121:
                 verdicts.append("Binance: not listed")
-            elif st == 200 and isinstance(j, dict) and j.get("symbols"):
-                status = j["symbols"][0].get("status")
-                if status != "TRADING":
-                    verdicts.append(f"Binance: status {status}")
             else:
-                log(f"preflight {s}: Binance answered HTTP {st}, not checked")
+                code = j.get("code") if isinstance(j, dict) else None
+                log(f"preflight {s}: Binance answered HTTP {st} (code {code}, no row for {s}), not checked")
         except (OSError, http.client.HTTPException) as e:
             log(f"preflight {s}: Binance unreachable ({type(e).__name__}), not checked")
         try:
             st, j = _get_json(*bitget, f"/api/v2/spot/public/symbols?symbol={urllib.parse.quote(s)}", ctx, timeout)
             data = j.get("data") if isinstance(j, dict) else None
-            if st == 200 and isinstance(data, list):
-                row = next((d for d in data if d.get("symbol") == s), None)
+            if st == 200 and j.get("code") == "00000" and isinstance(data, list):
+                row = next((d for d in data if isinstance(d, dict) and d.get("symbol") == s), None)
                 if row is None:
                     verdicts.append("Bitget: not listed")
-                elif row.get("status") != "online":
-                    verdicts.append(f"Bitget: status {row.get('status')}")
-            elif st == 400:                                   # parameter error = unknown symbol (429 / 5xx: not checked)
-                verdicts.append(f"Bitget: not listed ({j.get('code') if isinstance(j, dict) else st})")
+                elif not isinstance(row.get("status"), str):
+                    log(f"preflight {s}: Bitget row without status, not checked")
+                elif row["status"] != "online":
+                    verdicts.append(f"Bitget: status {row['status']}")
             else:
-                log(f"preflight {s}: Bitget answered HTTP {st}, not checked")
+                code = j.get("code") if isinstance(j, dict) else None
+                log(f"preflight {s}: Bitget answered HTTP {st} (code {code}), not checked")
         except (OSError, http.client.HTTPException) as e:
             log(f"preflight {s}: Bitget unreachable ({type(e).__name__}), not checked")
         if verdicts:
@@ -460,12 +587,12 @@ def clock_status() -> dict:
 def record(specs: list[ConnSpec], out: str, ctx: ssl.SSLContext, stop: threading.Event, hours: Optional[float] = None,
            status_s: float = 60.0, min_free_gb: float = 5.0, stale_s: float = 30.0, poll_s: float = 0.5,
            free_bytes: Callable[[str], int] = lambda p: shutil.disk_usage(p).free,
-           log: Callable[[str], None] = print, flush_s: float = 5.0) -> int:
+           log: Callable[[str], None] = print, flush_s: float = 5.0, stats_s: float = 60.0) -> int:
     os.makedirs(out, exist_ok=True)
     clock = {"v": clock_status(), "t": time.monotonic()}
     header = lambda: {"host": socket.gethostname(), **clock["v"]}  # noqa: E731
     recs = [ConnRecorder(s, HourlyWriter(out, s.name, flush_s=flush_s, header=header), ctx, stop, stale_s=stale_s,
-                         poll_s=poll_s, log=log) for s in specs]
+                         poll_s=poll_s, log=log, stats_s=stats_s) for s in specs]
     for r in recs:
         r.start()
     end = time.monotonic() + hours * 3600 if hours else None
@@ -484,6 +611,8 @@ def record(specs: list[ConnSpec], out: str, ctx: ssl.SSLContext, stop: threading
                 log(f"STOP: less than {min_free_gb} GB free on the data disk")
                 code = EXIT_DISK_FULL
                 break
+            for r in recs:
+                r.writer.flush_if_due()
             if now - clock["t"] >= 600:
                 clock.update(v=clock_status(), t=now)
             if now - t_status >= status_s:
@@ -565,7 +694,8 @@ def verify_conn(dirpath: str) -> dict:
     files = sorted((f for f in os.listdir(dirpath) if f.endswith(".tsv.gz")), key=_file_key)
     rep = {"conn": os.path.basename(dirpath), "files": len(files), "truncated": 0, "lines": 0, "data": 0,
            "bytes": sum(os.path.getsize(os.path.join(dirpath, f)) for f in files), "first_ns": None, "last_ns": None,
-           "sessions": 0, "down_s": 0.0, "errors": 0, "streams": {}, "expected": [], "reasons": Counter()}
+           "sessions": 0, "down_s": 0.0, "errors": 0, "streams": {}, "expected": [], "reasons": Counter(),
+           "reader": {"minutes": 0, "reads": 0, "msgs": 0, "batch_max": 0, "lag_p99_us": None, "lag_max_us": None}}
     venue = "binance" if rep["conn"].startswith("binance") else "bitget"
     last_by: dict = {}
     gap_by: dict = {}
@@ -585,6 +715,16 @@ def verify_conn(dirpath: str) -> dict:
                 except ValueError:
                     continue
                 ev = m.get("ev")
+                if ev == "stats":
+                    rd = rep["reader"]
+                    rd["minutes"] += 1
+                    rd["reads"] += int(m.get("reads", 0))
+                    rd["msgs"] += int(m.get("msgs", 0))
+                    rd["batch_max"] = max(rd["batch_max"], int(m.get("batch_max", 0)))
+                    for k in ("lag_p99_us", "lag_max_us"):
+                        if m.get(k) is not None:
+                            rd[k] = max(rd[k] or 0, int(m[k]))
+                    continue
                 if ev == "start":
                     rep["expected"] = sorted(set(rep["expected"]) | set(m.get("streams") or []))
                     if down_since is None and last_ns is not None:
@@ -653,6 +793,18 @@ def verify(roots: list[str]) -> tuple[str, list[dict]]:
                      + (f", **{len(silent)} stream TANPA data**: {', '.join(silent[:8])}" if silent else ""))
         for reason, n in r["reasons"].most_common(3):
             lines.append(f"  - putus {n}×: {reason}")
+    lines += ["", "## Reader lag (C-12)", "",
+              "Waktu dari stamp read pertama sebuah poll sampai batch itu selesai ditulis = berapa lama read berikutnya",
+              "tertahan oleh pemrosesan kita. Pesan dengan stamp yang sama berasal dari satu read: urutannya pasti, jaraknya tidak.",
+              "", "| Koneksi | Menit | Read | Pesan/read rata2 | Batch maks (pesan/read) | Lag p99 menit terburuk (µs) | Lag maks (µs) |",
+              "|---|---|---|---|---|---|---|"]
+    for r in reps:
+        rd = r["reader"]
+        if rd["minutes"]:
+            lines.append(f"| {r['conn']} | {rd['minutes']} | {rd['reads']:,} | {rd['msgs'] / max(rd['reads'], 1):.2f} | "
+                         f"{rd['batch_max']} | {rd['lag_p99_us']:,} | {rd['lag_max_us']:,} |")
+        else:
+            lines.append(f"| {r['conn']} | 0 | – | – | – | – | – |")
     lines += ["", "| Koneksi | Stream | Pesan | Pesan/s | Gap terpanjang (s) | Umur data p50 / p99 (ms) |", "|---|---|---|---|---|---|"]
     for r in reps:
         for k, s in r["streams"].items():
