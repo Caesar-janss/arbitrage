@@ -106,6 +106,12 @@ ditegakkan di `TradeGroup`, bukan panggilan host opsional.
 | B-02 | S4 | .gitignore | file rahasia (`.env`, `*.pem`, …) tidak dikecualikan | CONFIRMED | test merah + `git check-ignore` | `8b24145` |
 | B-03 | S4 | REGRESSION_LOG (resep) | resep reproduksi membuang `db/tests` → merah SQL tidak bisa direproduksi | CONFIRMED | replay 6 commit SQL | docs |
 
+### Builder — Tahap 2 langkah 1 (recorder, 2026-11-10)
+
+| ID | Sev | Area | Klaim (ringkas) | Status | Bukti | Fix |
+|---|---|---|---|---|---|---|
+| B-04 | S4 | Harness tes S0 (`test_latency_probe.py` `MockVenue.stop`) | listener ditutup saat acceptor masih bisa `accept()` di nomor fd yang dipakai ulang → mock lama melayani koneksi tes lain (flaky) | CONFIRMED | spy handshake: respons tanpa header `X-Mock: md`; 6–16/30 gagal di 10 suite paralel → 50/50 lulus sesudah fix | commit recorder (`docs/STAGE2_RECORDER.md` §5) |
+
 Replay merah→hijau dari clone bersih: 25 commit fix C# dan 6 commit fix SQL semuanya merah lalu hijau (detail di
 `REGRESSION_LOG.md`). B-01 mengubah kode sesudah review ChatGPT terakhir; S3, jadi re-review tidak wajib (§5), tetapi
 diff-nya kecil (2 guard) dan boleh dicek ChatGPT di PR berikutnya.

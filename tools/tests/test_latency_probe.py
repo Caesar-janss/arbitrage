@@ -58,10 +58,18 @@ class MockVenue:
         self.port = self.sock.getsockname()[1]
         self.pongs_received: list[bytes] = []
         self.running = True
-        threading.Thread(target=self._accept, daemon=True).start()
+        self._acceptor = threading.Thread(target=self._accept, daemon=True)
+        self._acceptor.start()
 
     def stop(self):
+        # Wake the acceptor and wait for it BEFORE closing the fd: a thread still about to call accept() on the old fd
+        # number would otherwise accept on whatever socket reuses that number next (another test's mock).
         self.running = False
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self._acceptor.join(5)
         self.sock.close()
 
     def _accept(self):
