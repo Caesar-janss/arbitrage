@@ -381,6 +381,25 @@ class RecorderTests(unittest.TestCase):
         self.assertGreaterEqual(rep["sessions"], 2)
         self.assertTrue(any("no market data" in r for r in rep["reasons"]))
 
+    def test_b05_an_unexpected_exception_does_not_kill_the_connection_thread(self):
+        # Found while fixing C-12 (a name clash raised TypeError inside the session): only network/protocol errors
+        # were caught, so any other exception ended the thread for good while the process, and systemd, stayed happy.
+        self.mock.reset()
+        real, calls = md.classify, {"n": 0}
+
+        def flaky(venue, text):
+            calls["n"] += 1
+            if calls["n"] == 5:
+                raise RuntimeError("simulated bug")
+            return real(venue, text)
+        md.classify = flaky
+        self.addCleanup(setattr, md, "classify", real)
+        self._record(self._specs()[:1], lambda: self._conn("binance-0")["sessions"] >= 2 and self._data_lines("binance-0") > 20)
+        rep = md.verify_conn(os.path.join(self.out, "binance-0"))
+        self.assertGreaterEqual(rep["sessions"], 2)
+        self.assertTrue(any("simulated bug" in r for r in rep["reasons"]))
+        self.assertTrue(any("RuntimeError" in l for l in self.logs))
+
     def test_disk_guard_stops_cleanly_with_exit_code(self):
         self.mock.reset()
         free = {"n": 10**12}

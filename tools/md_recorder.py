@@ -47,6 +47,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.parse
 import zlib
 from collections import Counter
@@ -401,6 +402,9 @@ class ConnRecorder(threading.Thread):
                     reason = f"{type(e).__name__}: {e}"[:300]
                 except _Stale as e:
                     reason = str(e)
+                except Exception as e:                      # a bug must cost a reconnect, never the whole feed (B-05)
+                    reason = f"unexpected {type(e).__name__}: {e}"[:300]
+                    self.log(f"{self.spec.name}: {reason}\n" + traceback.format_exc(limit=6))
                 finally:
                     if self.connected:
                         self.connected = False
