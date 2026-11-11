@@ -13,6 +13,8 @@ Tests for tools/md_recorder.py against a local TLS mock of both venues (stdlib o
 from __future__ import annotations
 
 import base64
+import contextlib
+import io
 import gzip
 import hashlib
 import json
@@ -794,8 +796,23 @@ class FileAndParseTests(unittest.TestCase):
         rep = md.verify_conn(os.path.join(self.dir, "bitget-0"))
         self.assertAlmostEqual(rep["down_s"], 27.0)                # 4 s → 31 s
 
+    def test_verify_last_hours_reads_only_recent_files(self):
+        H = 3_600_000_000_000
+        now = time.time_ns()
+        for k, age_h in enumerate((30, 5, 0)):                     # three hourly files: 30 h, 5 h and 0 h old
+            w = md.HourlyWriter(self.dir, "binance-0", flush_s=0)
+            w.write(now - age_h * H, json.dumps({"stream": "btcusdt@trade", "data": {"E": 1}}))
+            w.close()
+        self.assertEqual(md.verify_conn(os.path.join(self.dir, "binance-0"))["data"], 3)
+        self.assertEqual(md.verify_conn(os.path.join(self.dir, "binance-0"), now - 6 * H)["data"], 2)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            md.main(["--verify", self.dir, "--last-hours", "1"])
+        self.assertIn("1 file", out.getvalue())
+
     def test_cli_rejects_bad_arguments(self):
-        for argv in (["--venues", "kraken"], ["--hours", "0"], ["--symbols", "btc-usdt"], ["--status-s", "1"]):
+        for argv in (["--venues", "kraken"], ["--hours", "0"], ["--symbols", "btc-usdt"], ["--status-s", "1"],
+                     ["--verify", ".", "--last-hours", "0"]):
             with self.assertRaises(SystemExit, msg=argv):
                 md.main(argv)
 

@@ -34,6 +34,7 @@ Venue rules respected (sources and VERIFIED / UNVERIFIED status: docs/STAGE2_REC
 from __future__ import annotations
 
 import argparse
+import calendar
 import gzip
 import http.client
 import json
@@ -690,8 +691,11 @@ def _hist_pct(h: Counter, q: float) -> Optional[int]:
     return max(h)
 
 
-def verify_conn(dirpath: str) -> dict:
+def verify_conn(dirpath: str, since_ns: Optional[int] = None) -> dict:
+    """since_ns: only files whose UTC hour ends after this time (the hour is in the file name, no need to open it)."""
     files = sorted((f for f in os.listdir(dirpath) if f.endswith(".tsv.gz")), key=_file_key)
+    if since_ns is not None:
+        files = [f for f in files if _file_hour_end_ns(f) > since_ns]
     rep = {"conn": os.path.basename(dirpath), "files": len(files), "truncated": 0, "lines": 0, "data": 0,
            "bytes": sum(os.path.getsize(os.path.join(dirpath, f)) for f in files), "first_ns": None, "last_ns": None,
            "sessions": 0, "down_s": 0.0, "errors": 0, "streams": {}, "expected": [], "reasons": Counter(),
@@ -772,14 +776,23 @@ def verify_conn(dirpath: str) -> dict:
     return rep
 
 
-def verify(roots: list[str]) -> tuple[str, list[dict]]:
+def _file_hour_end_ns(name: str) -> int:
+    hour = _file_key(name)[0]                             # "YYYYmmdd-HH"
+    try:
+        t = time.strptime(hour, "%Y%m%d-%H")
+    except ValueError:
+        return 1 << 62                                    # unknown name: always include
+    return (calendar.timegm(t) + 3600) * 1_000_000_000
+
+
+def verify(roots: list[str], since_ns: Optional[int] = None) -> tuple[str, list[dict]]:
     dirs = []
     for root in roots:
         for d in sorted(os.listdir(root)):
             p = os.path.join(root, d)
             if os.path.isdir(p) and any(f.endswith(".tsv.gz") for f in os.listdir(p)):
                 dirs.append(p)
-    reps = [verify_conn(d) for d in dirs]
+    reps = [verify_conn(d, since_ns) for d in dirs]
     lines = ["# Rekaman market data — verifikasi", ""]
     for r in reps:
         if not r["first_ns"]:
@@ -826,10 +839,15 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--status-s", type=float, default=60.0)
     ap.add_argument("--no-preflight", action="store_true", help="skip the REST check that every symbol trades on both venues")
     ap.add_argument("--verify", nargs="+", metavar="DIR", help="report on recorded data instead of recording")
+    ap.add_argument("--last-hours", type=float, default=None,
+                    help="with --verify: only the files of the last N hours (fast check while recording)")
     a = ap.parse_args(argv)
 
     if a.verify:
-        text, _ = verify(a.verify)
+        if a.last_hours is not None and a.last_hours <= 0:
+            ap.error("--last-hours must be > 0")
+        since = time.time_ns() - int(a.last_hours * 3600e9) if a.last_hours else None
+        text, _ = verify(a.verify, since)
         print(text)
         return 0
     venues = [v.strip() for v in a.venues.split(",") if v.strip()]
