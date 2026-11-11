@@ -75,38 +75,72 @@ def utc(ns: int) -> str:
 # ── WebSocket reader that never loses bytes on a timeout ─────────────────────────────────────────────────────────────
 class PollingWs(lp.WsClient):
     """
-    poll(timeout) returns the complete text messages that arrived, or [] after the timeout. Unlike WsClient.recv_text,
-    a frame is consumed only once ALL of it is buffered, so a timeout in the middle of a frame loses nothing (the
-    recorder must wake up regularly to send Bitget's keepalive and to notice a silent connection). Server pings are
-    answered with a pong carrying the same payload; fragments are reassembled, also across interleaved control frames.
+    poll(timeout) returns the complete text messages that arrived, or [] after the timeout. poll_stamped(timeout) returns
+    them as (recv_unix_ns, text), stamped right after the socket read that delivered the message's last byte, BEFORE any
+    processing. Messages completed by the same read share a stamp: their order is known, their spacing is not.
+
+    Rules (review C-11 / C-12):
+    - A frame is consumed only once all of it is buffered, so a timeout in the middle of a frame loses nothing (the
+      recorder wakes up regularly to send Bitget's keepalive and to notice a silent connection).
+    - Every complete message is delivered before a close frame, a failed pong, EOF or a protocol error is reported: the
+      error is raised by the NEXT call, once. Bytes after a close frame are not messages and are discarded.
+    - Complete frames already buffered (e.g. sent together with the handshake response) are returned without waiting.
+    Server pings are answered with a pong carrying the same payload; fragments are reassembled, also across interleaved
+    control frames; a message (all its fragments) larger than MAX_FRAME is refused.
     """
 
     def connect(self) -> None:
         super().connect()
         self._rbuf = bytearray(self._buf)        # bytes that arrived together with the handshake response
+        self._rbuf_ns = time.time_ns()
         self._buf = b""
         self._frag: list[bytes] = []
 
     def poll(self, timeout: float) -> list[str]:
+        return [m for _, m in self.poll_stamped(timeout)]
+
+    def poll_stamped(self, timeout: float) -> list[tuple[int, str]]:
+        self._raise_pending()
+        out = self._drain(getattr(self, "_rbuf_ns", None) or time.time_ns()) if self._rbuf else []
+        self._rbuf_ns = None
+        if out or self._pending():
+            return self._finish(out)
         self.sock.settimeout(timeout)
         try:
             chunk = self.sock.recv(1 << 18)
         except (socket.timeout, ssl.SSLWantReadError):
-            chunk = None
-        else:
-            if not chunk:
-                raise lp.WsError("connection closed by peer")
-        if chunk:
+            return out
+        except (OSError, ssl.SSLError) as e:
+            self._error = e
+            return self._finish(out)
+        if not chunk:
+            self._error = lp.WsError("connection closed by peer")
+            return self._finish(out)
+        while chunk:
+            ns = time.time_ns()                   # the stamp: right after the read, before any parsing or writing
             self._rbuf += chunk
+            out += self._drain(ns)
             pending = getattr(self.sock, "pending", None)
-            while pending and pending():          # TLS bytes already decrypted: take them without waiting
-                self._rbuf += self.sock.recv(pending())
-        return self._drain()
+            chunk = self.sock.recv(pending()) if pending and pending() and not getattr(self, "_closed", False) else b""
+        return self._finish(out)
 
-    def _drain(self) -> list[str]:
+    def _pending(self) -> bool:
+        return getattr(self, "_error", None) is not None
+
+    def _raise_pending(self) -> None:
+        if self._pending():
+            e, self._error = self._error, None
+            raise e
+
+    def _finish(self, out: list) -> list:
+        if not out:
+            self._raise_pending()
+        return out
+
+    def _drain(self, ns: int) -> list[tuple[int, str]]:
         b, i, out = self._rbuf, 0, []
         try:
-            while len(b) - i >= 2:
+            while len(b) - i >= 2 and not getattr(self, "_closed", False):
                 b0, b1 = b[i], b[i + 1]
                 n, h = b1 & 0x7F, 2
                 if n == 126:
@@ -118,7 +152,9 @@ class PollingWs(lp.WsClient):
                         break
                     n, h = int.from_bytes(b[i + 2:i + 10], "big"), 10
                 if n > MAX_FRAME:
-                    raise lp.WsError(f"frame of {n} bytes")
+                    self._error, self._closed = lp.WsError(f"frame of {n} bytes"), True
+                    i = len(b)
+                    break
                 mask = None
                 if b1 & 0x80:
                     if len(b) - i < h + 4:
@@ -132,18 +168,26 @@ class PollingWs(lp.WsClient):
                     payload = bytes(x ^ mask[k % 4] for k, x in enumerate(payload))
                 op, fin = b0 & 0x0F, b0 & 0x80
                 if op == 0x9:
-                    self._send_frame(0xA, payload)
+                    try:
+                        self._send_frame(0xA, payload)
+                    except (OSError, ssl.SSLError) as e:    # keep delivering what already arrived; report after
+                        self._error = getattr(self, "_error", None) or e
                 elif op == 0xA:
                     pass
                 elif op == 0x8:
                     code = int.from_bytes(payload[:2], "big") if len(payload) >= 2 else None
-                    raise lp.WsError(f"server closed: code {code} {payload[2:80]!r}")
+                    self._error, self._closed = lp.WsError(f"server closed: code {code} {payload[2:80]!r}"), True
+                    i = len(b)                              # anything after a close frame is not a message
                 elif op in (0x1, 0x2, 0x0):
                     if op != 0x0:
                         self._frag = []
                     self._frag.append(payload)
-                    if fin:
-                        out.append(b"".join(self._frag).decode("utf-8", "replace"))
+                    if sum(len(f) for f in self._frag) > MAX_FRAME:
+                        self._error, self._closed = lp.WsError(f"fragmented message over {MAX_FRAME} bytes"), True
+                        self._frag = []
+                        i = len(b)
+                    elif fin:
+                        out.append((ns, b"".join(self._frag).decode("utf-8", "replace")))
                         self._frag = []
         finally:
             del b[:i]

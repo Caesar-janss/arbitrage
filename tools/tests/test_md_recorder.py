@@ -35,6 +35,17 @@ import md_recorder as md  # noqa: E402
 
 BINANCE_LISTED = {"BTCUSDT": "TRADING", "ETHUSDT": "TRADING", "OLDUSDT": "BREAK", "ONLYBGUSDT": None}
 BITGET_LISTED = {"BTCUSDT": "online", "ETHUSDT": "online", "OLDUSDT": "online", "ONLYBNUSDT": None, "HALTUSDT": "halt"}
+# C-13: answers that do NOT prove a symbol is unlisted (status, body); body None = non-JSON
+BITGET_ODD = {
+    "NONJSONUSDT": (400, None),
+    "SYSERRUSDT": (400, {"code": "40015", "msg": "System is abnormal, please try again later"}),
+    "ENVERRUSDT": (200, {"code": "40015", "data": []}),
+    "PARAMUSDT": (400, {"code": "40034", "msg": "Parameter does not exist"}),
+}
+BINANCE_ODD = {
+    "WRONGROWUSDT": (200, {"symbols": [{"symbol": "OTHERUSDT", "status": "BREAK"}]}),
+    "B400USDT": (400, {"code": -1100, "msg": "Illegal characters found in a parameter."}),
+}
 
 
 def _frame(opcode: int, payload: bytes, fin: bool = True) -> bytes:
@@ -97,6 +108,7 @@ class MockVenues:
         self.binance_pongs: list[bytes] = []
         self.bitget_pings: list[float] = []
         self.bitget_subs: list[dict] = []
+        self.bitget_sub_ns: list[int] = []
         self.ws_sessions = {"binance": 0, "bitget": 0}
 
     def stop(self):
@@ -160,14 +172,15 @@ class MockVenues:
         q = urllib.parse.parse_qs(url.query)
         sym = q.get("symbol", [""])[0]
         if url.path == "/api/v3/exchangeInfo":
-            st = BINANCE_LISTED.get(sym)
-            status, body = (200, {"symbols": [{"symbol": sym, "status": st}]}) if st else (400, {"code": -1121, "msg": "Invalid symbol."})
+            st = BINANCE_LISTED.get(sym, "TRADING" if sym in BITGET_ODD else None)
+            status, body = BINANCE_ODD.get(sym) or ((200, {"symbols": [{"symbol": sym, "status": st}]}) if st else (400, {"code": -1121, "msg": "Invalid symbol."}))
         elif url.path == "/api/v2/spot/public/symbols":
-            st = BITGET_LISTED.get(sym)
-            status, body = (200, {"code": "00000", "data": [{"symbol": sym, "status": st}]}) if st else (400, {"code": "40034", "msg": "Parameter does not exist"})
+            st = BITGET_LISTED.get(sym, "online" if sym in BINANCE_ODD else None)
+            # unknown symbol: authoritative success with no row (C-13: the only answer that may DROP a symbol)
+            status, body = BITGET_ODD.get(sym) or ((200, {"code": "00000", "data": [{"symbol": sym, "status": st}]}) if st else (200, {"code": "00000", "data": []}))
         else:
             status, body = 404, {}
-        data = json.dumps(body).encode()
+        data = b"<html>bad gateway</html>" if body is None else json.dumps(body).encode()
         c.sendall(f"HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {len(data)}\r\nConnection: close\r\n\r\n".encode() + data)
 
     def _binance(self, c, buf, streams):
@@ -222,6 +235,7 @@ class MockVenues:
                     c.sendall(_frame(0x1, b"pong"))
                     continue
                 req = json.loads(text)
+                self.bitget_sub_ns.append(time.time_ns())
                 for arg in req["args"]:
                     self.bitget_subs.append(arg)
                     if arg["instId"] == "BADUSDT":
@@ -290,7 +304,8 @@ class RecorderTests(unittest.TestCase):
         self._when(until, stop.set, timeout)
         kw.setdefault("free_bytes", lambda p: 10**12)
         kw.setdefault("status_s", 0.5)
-        return md.record(specs, self.out, self.ctx, stop, poll_s=0.02, flush_s=0.05, log=self.logs.append, **kw)
+        kw.setdefault("flush_s", 0.05)
+        return md.record(specs, self.out, self.ctx, stop, poll_s=0.02, log=self.logs.append, **kw)
 
     def _conn(self, conn: str) -> dict:
         d = os.path.join(self.out, conn)
@@ -385,7 +400,12 @@ class RecorderTests(unittest.TestCase):
         self.assertIn("binance-0 UP", status[-1])
         self.assertIn("GB/day", status[-1])
 
-    # ── preflight ───────────────────────────────────────────────────────────────────────────────────────────────
+    def _stats_lines(self, conn: str) -> int:
+        d = os.path.join(self.out, conn)
+        if not os.path.isdir(d):
+            return 0
+        return sum(1 for f in os.listdir(d) for _, p in md.read_file(os.path.join(d, f)) if p.startswith('#{"ev":"stats"'))
+
     def test_preflight_keeps_only_symbols_trading_on_both(self):
         logs = []
         keep = md.preflight(["BTCUSDT", "ETHUSDT", "OLDUSDT", "ONLYBGUSDT", "ONLYBNUSDT", "HALTUSDT"], self.ctx,
@@ -438,9 +458,55 @@ class PollingWsUnitTests(unittest.TestCase):
     def test_close_frame_raises_with_code(self):
         ws, peer = self._pair()
         peer.sendall(_frame(0x1, b"last") + _frame(0x8, struct.pack("!H", 1008) + b"policy"))
+        got = []
         with self.assertRaises(lp.WsError) as e:
-            ws.poll(0.1)
+            for _ in range(5):
+                got += ws.poll(0.1)
         self.assertIn("1008", str(e.exception))
+        self.assertEqual(got, ["last"])                          # C-11: delivered before the close is reported
+
+    def test_c11_messages_before_a_close_in_the_same_read_are_delivered(self):
+        ws, peer = self._pair()
+        peer.sendall(_frame(0x1, b"A") + _frame(0x1, b"B") + _frame(0x8, struct.pack("!H", 1000)) + _frame(0x1, b"after"))
+        got = []
+        with self.assertRaises(lp.WsError) as e:
+            for _ in range(5):
+                got += ws.poll(0.1)
+        self.assertEqual(got, ["A", "B"])                        # nothing after the close frame is a message
+        self.assertIn("1000", str(e.exception))
+
+    def test_c11_a_failed_pong_does_not_lose_complete_messages(self):
+        ws, peer = self._pair()
+
+        def send_times_out(op, payload):
+            raise socket.timeout("send timed out")
+        ws._send_frame = send_times_out
+        peer.sendall(_frame(0x1, b"A") + _frame(0x9, b"p") + _frame(0x1, b"B"))
+        got = []
+        with self.assertRaises(OSError):
+            for _ in range(5):
+                got += ws.poll(0.1)
+        self.assertEqual(got, ["A", "B"])
+
+    def test_c11_bytes_from_the_handshake_are_delivered_even_if_the_peer_then_closes(self):
+        ws, peer = self._pair()
+        ws._rbuf = bytearray(_frame(0x1, b"early"))              # arrived together with the 101 response
+        peer.close()
+        got = []
+        with self.assertRaises(lp.WsError):
+            for _ in range(3):
+                got += ws.poll(0.5)
+        self.assertEqual(got, ["early"])
+
+    def test_c11_unbounded_fragment_stream_is_refused(self):
+        ws, peer = self._pair()
+        old = md.MAX_FRAME
+        md.MAX_FRAME = 1000
+        self.addCleanup(setattr, md, "MAX_FRAME", old)
+        peer.sendall(_frame(0x1, b"x" * 600, fin=False) + _frame(0x0, b"x" * 600, fin=False))
+        with self.assertRaises(lp.WsError):
+            for _ in range(5):
+                ws.poll(0.1)
 
     def test_peer_eof_raises(self):
         ws, peer = self._pair()
