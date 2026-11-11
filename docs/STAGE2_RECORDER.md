@@ -67,11 +67,12 @@ File di-flush (Z_SYNC_FLUSH) tiap 5 detik, jadi crash atau mati listrik paling b
 | Bitget `wss://ws.bitget.com/v2/ws/public`; kirim `ping` tiap 30 s, diputus setelah 2 menit tanpa ping | keepalive tiap 25 s | VERIFIED 2026-11-10 | [Bitget WebSocket intro](https://www.bitget.com/docs/classic/websocket/intro) |
 | Bitget: ≤ 1000 channel/koneksi, disarankan < 50; request subscribe ≤ 4096 byte; subscribe ≤ 50 per 5 s | 40 channel/koneksi, 20 arg/request, jeda 0,15 s | VERIFIED 2026-11-10 | idem |
 | Bitget `books1` snapshot 10 ms, `books15` snapshot 200 ms, push `{"action","arg","data":[{asks,bids,ts,seq}]}` | channel & parser | VERIFIED 2026-11-10 | [Bitget Depth Channel](https://www.bitget.com/docs/classic/websocket/spot/public/Depth-Channel) |
-| Bitget channel `trade` | channel | UNVERIFIED (nama dari ingatan; kalau salah, Bitget membalas event `error` yang tercatat di log dan `--verify` melaporkan stream tanpa data) | — |
+| Bitget channel `trade` | channel | VERIFIED 2026-11-11 secara empiris (run uji md-tokyo: 16/16 simbol ada data, 0 error venue). Saat subscribe, Bitget mengirim `action:"snapshot"` berisi trade terakhir (bisa berumur menit); `--verify` tidak menghitungnya sebagai umur data | run uji |
 | Preflight: Binance `GET /api/v3/exchangeInfo?symbol=X` (status `TRADING`, error `-1121`), Bitget `GET /api/v2/spot/public/symbols?symbol=X` (status `online`) | buang simbol | UNVERIFIED; jawaban yang tidak dikenali **tidak** membuang simbol (hanya "not checked") | — |
 
-Dua baris UNVERIFIED pertama terlihat langsung di menit pertama run uji (§1): pesan `trade` Bitget ada atau tidak, dan
-preflight membuang simbol atau tidak.
+Run uji pertama di md-tokyo (2026-11-11, 3 menit): 16/16 simbol lolos preflight Binance dan Bitget, 96/96 stream ada
+data, coverage 100 %, ~4,1 GB/hari (bukan 10–15 GB: disk 100 GB cukup ~22 hari). Umur data p50: Binance trade 2–3 ms,
+Bitget books1 8–14 ms, Bitget books15 7–13 ms (p99 sampai ~200 ms, sesuai snapshot tiap 200 ms).
 
 ## 4. Bukti (tes, mutation, performa)
 
