@@ -111,6 +111,16 @@ ditegakkan di `TradeGroup`, bukan panggilan host opsional.
 | ID | Sev | Area | Klaim (ringkas) | Status | Bukti | Fix |
 |---|---|---|---|---|---|---|
 | B-04 | S4 | Harness tes S0 (`test_latency_probe.py` `MockVenue.stop`) | listener ditutup saat acceptor masih bisa `accept()` di nomor fd yang dipakai ulang → mock lama melayani koneksi tes lain (flaky) | CONFIRMED | spy handshake: respons tanpa header `X-Mock: md`; 6–16/30 gagal di 10 suite paralel → 50/50 lulus sesudah fix | commit recorder (`docs/STAGE2_RECORDER.md` §5) |
+| B-05 | S3 | `md_recorder.ConnRecorder.run` | exception di luar daftar (bug, payload tak terduga) mematikan thread koneksi selamanya; proses dan systemd tetap "sehat" | CONFIRMED | ditemukan saat fix C-12 (TypeError karena bentrok nama dengan `threading.Thread._handle`); tes merah: 1 sesi | `603a80a` |
+
+### ChatGPT — Tahap 2 ronde 1 (review post-merge PR #6 [6799546635](https://github.com/Caesar-janss/arbitrage/pull/6#issuecomment-6799546635) @ `4acb424`)
+
+| ID | Sev | Area | Klaim (ringkas) | Status | Bukti triase | Fix |
+|---|---|---|---|---|---|---|
+| C-11 | S2 | `PollingWs._drain/poll` | pesan lengkap hilang bila close / gagal pong / EOF ada di read yang sama | CONFIRMED | 5 tes merah (`docs/review/stage2/REGRESSION_LOG.md`) | `efee67c` |
+| C-12 | S2 | stamp `recv_unix_ns` | satu stamp per batch setelah parse; byte handshake & jeda subscribe menunda read | CONFIRMED | ack pertama di-stamp 146–150 ms terlambat; buffer menunggu 0,5 s | `5683a51` (+ aturan analisis di `STAGE2_RECORDER.md` §2) |
+| C-13 | S3 | `preflight` | Bitget: semua HTTP 400 / amplop error = simbol tidak terdaftar | CONFIRMED | 6/7 jawaban non-otoritatif membuang simbol | `9da5e65` |
+| C-14 | S3 | `HourlyWriter` | batas kehilangan 5 s tidak terpenuhi: flush hanya saat tulis berikutnya, tanpa fsync | CONFIRMED | feed diam 0/10 baris terlihat; feed sibuk 0 fsync | `59ac432` |
 
 Replay merah→hijau dari clone bersih: 25 commit fix C# dan 6 commit fix SQL semuanya merah lalu hijau (detail di
 `REGRESSION_LOG.md`). B-01 mengubah kode sesudah review ChatGPT terakhir; S3, jadi re-review tidak wajib (§5), tetapi
