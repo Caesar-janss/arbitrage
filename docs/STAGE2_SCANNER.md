@@ -38,7 +38,11 @@ terbesar **saat ini** (sekadar indikator; laporan yang menentukan).
   diambil paralel, tidak pada detik yang persis sama, jadi selisih satu snapshot bisa artefak waktu. Venue yang gagal di
   satu ronde **mengakhiri** episode (tidak dijembatani).
 - Dibuang dan dilaporkan terpisah, karena kemungkinan **tidak bisa diambil**:
-  - mid satu venue > 10 % dari median venue lain: biasanya token berbeda di balik ticker yang sama, atau pasar mati;
+  - mid satu venue > 10 % dari median venue lain: biasanya token berbeda di balik ticker yang sama, atau pasar mati.
+    Hanya kutipan venue yang menyimpang yang dibuang bila venue yang sepakat mayoritas (≥ 2); kalau tidak bisa
+    dipastikan siapa yang benar (mis. hanya 2 venue), koin itu dibuang untuk snapshot tersebut. Filter yang sama dipakai
+    di baris `now:` status line (run pertama md-tokyo: RON di Bitget ~1.640× harga MEXC/OKX tampil sebagai
+    "+16.410.477 bps" sebelum fix ini);
   - ≥ 3 snapshot tanpa perubahan harga/ukuran di kedua sisi: book beku;
   - bertahan > `--suspect-minutes` (default 10): biasanya deposit/withdraw ditutup, sehingga saldo tidak bisa
     diseimbangkan (inilah jebakan "selisih besar");
@@ -57,14 +61,15 @@ data mentah; data tidak perlu direkam ulang). Wajib dicek dari halaman fee resmi
 |---|---|---|---|
 | Binance | `GET api.binance.com/api/v3/ticker/bookTicker` (weight 4 tanpa symbol) | `symbol, bidPrice, bidQty, askPrice, askQty` | VERIFIED (dokumen resmi, 2026-11-11) |
 | Bybit | `GET api.bybit.com/v5/market/tickers?category=spot` | `result.list[]: symbol, bid1Price, bid1Size, ask1Price, ask1Size`; `time` | Field VERIFIED untuk linear/inverse; spot diasumsikan sama |
-| Kraken | `GET api.kraken.com/0/public/AssetPairs` + `/0/public/Ticker` (tanpa pair = semua) | `wsname "XBT/USDT"`, `status`; `a/b: [harga, whole lot, lot volume]` | VERIFIED (dokumen resmi) |
-| Bitget | `GET api.bitget.com/api/v2/spot/market/tickers` | `data[]: symbol, bidPr, bidSz, askPr, askSz, ts` | UNVERIFIED |
-| OKX | `GET www.okx.com/api/v5/market/tickers?instType=SPOT` | `data[]: instId "BTC-USDT", bidPx, bidSz, askPx, askSz, ts` | UNVERIFIED |
-| MEXC | `GET api.mexc.com/api/v3/ticker/bookTicker` | sama dengan Binance | UNVERIFIED |
-| Gate | `GET api.gateio.ws/api/v4/spot/tickers` | `currency_pair "BTC_USDT", highest_bid, lowest_ask, highest_size, lowest_size` | UNVERIFIED (ukuran bisa tidak ada → "tanpa ukuran") |
-| KuCoin | `GET api.kucoin.com/api/v1/market/allTickers` | `data.ticker[]: symbol "BTC-USDT", buy, sell, bestBidSize, bestAskSize`; `data.time` | UNVERIFIED |
+| Kraken | `GET api.kraken.com/0/public/AssetPairs` + `/0/public/Ticker` (tanpa pair = semua) | `wsname "XBT/USDT"`, `status`; `a/b: [harga, whole lot, lot volume]` | VERIFIED (dokumen resmi; probe: 44 pasangan USDT, ukuran tampak dibulatkan ke lot utuh) |
+| Bitget | `GET api.bitget.com/api/v2/spot/market/tickers` | `data[]: symbol, bidPr, bidSz, askPr, askSz, ts` | VERIFIED empiris (`--probe` md-tokyo 2026-11-11: 3.598 pasangan, BTC konsisten) |
+| OKX | `GET www.okx.com/api/v5/market/tickers?instType=SPOT` | `data[]: instId "BTC-USDT", bidPx, bidSz, askPx, askSz, ts` | VERIFIED empiris (475 pasangan) |
+| MEXC | `GET api.mexc.com/api/v3/ticker/bookTicker` | sama dengan Binance | VERIFIED empiris (1.413 pasangan) |
+| Gate | `GET api.gateio.ws/api/v4/spot/tickers` | `currency_pair "BTC_USDT", highest_bid, lowest_ask` | VERIFIED empiris (2.004 pasangan). **Tidak ada ukuran top-of-book** (`highest_size/lowest_size` tidak ada di jawaban): episode Gate masuk "tanpa ukuran", tidak ikut peringkat $/hari |
+| KuCoin | `GET api.kucoin.com/api/v1/market/allTickers` | `data.ticker[]: symbol "BTC-USDT", buy, sell, bestBidSize, bestAskSize`; `data.time` | VERIFIED empiris (803 pasangan) |
 
-Halaman resmi venue UNVERIFIED tidak bisa dibuka dari sandbox builder. Field yang salah membuat venue itu `FAIL ... 0 USDT
+Run pertama md-tokyo: 8/8 venue ok tiap ronde, ~1 MB/menit (≈ 1,4 GB/hari) → bersama recorder ≈ 5,5 GB/hari, disk 100 GB
+cukup ~17 hari. Halaman resmi venue di atas tidak bisa dibuka dari sandbox builder; verifikasinya dari probe. Field yang salah membuat venue itu `FAIL ... 0 USDT
 pairs parsed` di `--probe`, tidak salah diam-diam. Interval 5 s jauh di bawah batas rate publik yang tercatat (Binance
 weight 4/ronde dari 6.000/menit; venue lain dicek saat probe/run).
 
