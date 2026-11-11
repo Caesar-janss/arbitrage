@@ -274,10 +274,20 @@ def classify(venue: str, text: str) -> tuple[str, Optional[str]]:
 
 # ── output: one gzip file per connection per UTC hour ──────────────────────────────────────────────────────────────
 class HourlyWriter:
-    def __init__(self, root: str, conn: str, flush_s: float = 5.0, level: int = 6, header: Callable[[], dict] = dict):
+    """
+    Durability (review C-14): written lines reach the OS at least every flush_s seconds, also when the feed is idle
+    (flush_if_due, called by record() every tick), and are fsync'ed right after. A process crash loses at most the last
+    ~flush_s seconds; a VM/host crash at most ~flush_s plus the fsync in flight. Rotation fsyncs the closed file.
+    """
+
+    def __init__(self, root: str, conn: str, flush_s: float = 5.0, level: int = 6, header: Callable[[], dict] = dict,
+                 clock: Callable[[], float] = time.monotonic):
         self.dir = os.path.join(root, conn)
         os.makedirs(self.dir, exist_ok=True)
-        self.flush_s, self.level, self.header = flush_s, level, header
+        self.flush_s, self.level, self.header, self.clock = flush_s, level, header, clock
+        self._dirty = False
+        self._unsynced = False
+        self._last_sync = 0.0
         self._lock = threading.Lock()
         self._hour: Optional[int] = None
         self._raw = None
@@ -303,10 +313,29 @@ class HourlyWriter:
         if "\n" in payload or "\r" in payload:          # JSON whitespace only; keeps one message per line
             payload = payload.replace("\r", " ").replace("\n", " ")
         self._gz.write(f"{ns}\t{payload}\n".encode())
-        now = time.monotonic()
+        self._dirty = True
+        now = self.clock()
         if now - self._last_flush >= self.flush_s:
             self._gz.flush()                            # Z_SYNC_FLUSH: everything so far is readable after a crash
-            self._last_flush = now
+            self._last_flush, self._dirty, self._unsynced = now, False, True
+
+    def flush_if_due(self) -> None:
+        """Timer side of the flush: an idle feed must not keep its tail in the compressor (C-14)."""
+        fd = None
+        with self._lock:
+            if not self._gz:
+                return
+            now = self.clock()
+            if self._dirty and now - self._last_flush >= self.flush_s:
+                self._gz.flush()
+                self._last_flush, self._dirty, self._unsynced = now, False, True
+            if self._unsynced and now - self._last_sync >= self.flush_s:
+                fd, self._last_sync, self._unsynced = self._raw.fileno(), now, False
+        if fd is not None:
+            try:
+                os.fsync(fd)                            # outside the lock: the reader thread never waits on the disk
+            except OSError:
+                pass                                    # file rotated/closed meanwhile: rotation fsynced it
 
     def write(self, ns: int, payload: str) -> None:
         with self._lock:
@@ -325,6 +354,11 @@ class HourlyWriter:
         if self._gz:
             self._gz.close()
             self.closed_bytes += self._raw.tell()
+            self._raw.flush()
+            try:
+                os.fsync(self._raw.fileno())
+            except OSError:
+                pass
             self._raw.close()
         self._gz = self._raw = None
 
@@ -573,6 +607,8 @@ def record(specs: list[ConnSpec], out: str, ctx: ssl.SSLContext, stop: threading
                 log(f"STOP: less than {min_free_gb} GB free on the data disk")
                 code = EXIT_DISK_FULL
                 break
+            for r in recs:
+                r.writer.flush_if_due()
             if now - clock["t"] >= 600:
                 clock.update(v=clock_status(), t=now)
             if now - t_status >= status_s:

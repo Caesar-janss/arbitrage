@@ -431,6 +431,18 @@ class RecorderTests(unittest.TestCase):
             return 0
         return sum(1 for f in os.listdir(d) for _, p in md.read_file(os.path.join(d, f)) if p.startswith('#{"ev":"stats"'))
 
+    def test_c14_an_idle_feed_is_still_flushed_on_time(self):
+        # 10 messages, then silence. With flush only on the next write, the tail stayed in the compressor.
+        self.mock.reset(silent_after=10)
+        seen = {"n": 0}
+
+        def ten_visible():
+            seen["n"] = self._data_lines("binance-0")
+            return seen["n"] >= 10
+        self._record(self._specs()[:1], ten_visible, timeout=4.0, flush_s=0.3)
+        self.assertGreaterEqual(seen["n"], 10, "tail of an idle feed never reached the file while running")
+
+    # ── preflight ───────────────────────────────────────────────────────────────────────────────────────────────
     def test_c13_preflight_drops_only_on_an_authoritative_answer(self):
         logs = []
         odd = list(BITGET_ODD) + list(BINANCE_ODD)
@@ -664,6 +676,36 @@ class FileAndParseTests(unittest.TestCase):
         self.assertEqual(rep["truncated"], 1)
         w._gz = None                                               # the writer's file was replaced underneath it
         w._raw.close()
+
+    def test_c14_flush_is_due_by_time_not_by_the_next_write(self):
+        now = {"t": 100.0}
+        w = md.HourlyWriter(self.dir, "c", flush_s=5.0, clock=lambda: now["t"])
+        w.write(10**18, "checkpoint")                              # first write flushes (nothing flushed yet)
+        now["t"] = 101.0
+        w.write(10**18 + 1, "pending")                             # not yet due
+        now["t"] = 106.5
+        w.flush_if_due()                                           # no new write: the timer alone must flush
+        got = [p for _, p in md.read_file(w.path) if not p.startswith("#")]
+        self.assertEqual(got, ["checkpoint", "pending"])
+        w.close()
+
+    def test_c14_a_busy_feed_is_fsynced_every_interval_too(self):
+        synced = []
+        real = os.fsync
+        os.fsync = lambda fd: synced.append(fd)
+        self.addCleanup(setattr, os, "fsync", real)
+        now = {"t": 100.0}
+        w = md.HourlyWriter(self.dir, "c", flush_s=5.0, clock=lambda: now["t"])
+        w.write(10**18, "a")                                       # flushed by the write itself
+        now["t"] = 101.0
+        w.flush_if_due()
+        self.assertEqual(len(synced), 1)                           # flushed data reaches the disk at the next tick
+        for t in (103.0, 105.5, 107.0):                            # busy: writes keep flushing, never "idle"
+            now["t"] = t
+            w.write(10**18 + int(t), "b")
+            w.flush_if_due()
+        self.assertEqual(len(synced), 2)                           # 106+: second fsync, despite constant writes
+        w.close()
 
     def test_newlines_inside_a_message_cannot_break_the_line_format(self):
         w = md.HourlyWriter(self.dir, "c", flush_s=0)
