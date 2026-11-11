@@ -484,37 +484,44 @@ def _get_json(host: str, port: int, path: str, ctx: ssl.SSLContext, timeout: flo
 def preflight(symbols: list[str], ctx: ssl.SSLContext, binance=("api.binance.com", 443), bitget=("api.bitget.com", 443),
               timeout: float = 5.0, log: Callable[[str], None] = print) -> list[str]:
     """
-    Keep a symbol only if Binance says TRADING and Bitget says online. A venue that cannot be asked (network error,
-    unexpected answer) does not drop anything: the recorder's silent-stream warning is the second line of defence.
+    Keep a symbol unless a venue gives an AUTHORITATIVE answer that it does not trade (review C-13):
+      Binance  200 with this symbol's row and status != TRADING, or 400 with code -1121 ("Invalid symbol.")
+      Bitget   200 with code "00000" and a data list that has no row for this symbol, or whose row status != "online"
+    Everything else (network error, 5xx/429, non-JSON, other error codes, an answer about another symbol, a missing
+    status) is "not checked" and keeps the symbol: a transient error must never shrink the recorded universe. The
+    recorder's silent-stream warning and --verify are the second line of defence.
     """
     keep = []
     for s in symbols:
         verdicts = []
         try:
             st, j = _get_json(*binance, f"/api/v3/exchangeInfo?symbol={urllib.parse.quote(s)}", ctx, timeout)
-            if st == 400 and isinstance(j, dict) and j.get("code") == -1121:      # "Invalid symbol."
+            rows = j.get("symbols") if isinstance(j, dict) else None
+            row = next((r for r in rows if isinstance(r, dict) and r.get("symbol") == s), None) if isinstance(rows, list) else None
+            if st == 200 and row is not None and isinstance(row.get("status"), str):
+                if row["status"] != "TRADING":
+                    verdicts.append(f"Binance: status {row['status']}")
+            elif st == 400 and isinstance(j, dict) and j.get("code") == -1121:
                 verdicts.append("Binance: not listed")
-            elif st == 200 and isinstance(j, dict) and j.get("symbols"):
-                status = j["symbols"][0].get("status")
-                if status != "TRADING":
-                    verdicts.append(f"Binance: status {status}")
             else:
-                log(f"preflight {s}: Binance answered HTTP {st}, not checked")
+                code = j.get("code") if isinstance(j, dict) else None
+                log(f"preflight {s}: Binance answered HTTP {st} (code {code}, no row for {s}), not checked")
         except (OSError, http.client.HTTPException) as e:
             log(f"preflight {s}: Binance unreachable ({type(e).__name__}), not checked")
         try:
             st, j = _get_json(*bitget, f"/api/v2/spot/public/symbols?symbol={urllib.parse.quote(s)}", ctx, timeout)
             data = j.get("data") if isinstance(j, dict) else None
-            if st == 200 and isinstance(data, list):
-                row = next((d for d in data if d.get("symbol") == s), None)
+            if st == 200 and j.get("code") == "00000" and isinstance(data, list):
+                row = next((d for d in data if isinstance(d, dict) and d.get("symbol") == s), None)
                 if row is None:
                     verdicts.append("Bitget: not listed")
-                elif row.get("status") != "online":
-                    verdicts.append(f"Bitget: status {row.get('status')}")
-            elif st == 400:                                   # parameter error = unknown symbol (429 / 5xx: not checked)
-                verdicts.append(f"Bitget: not listed ({j.get('code') if isinstance(j, dict) else st})")
+                elif not isinstance(row.get("status"), str):
+                    log(f"preflight {s}: Bitget row without status, not checked")
+                elif row["status"] != "online":
+                    verdicts.append(f"Bitget: status {row['status']}")
             else:
-                log(f"preflight {s}: Bitget answered HTTP {st}, not checked")
+                code = j.get("code") if isinstance(j, dict) else None
+                log(f"preflight {s}: Bitget answered HTTP {st} (code {code}), not checked")
         except (OSError, http.client.HTTPException) as e:
             log(f"preflight {s}: Bitget unreachable ({type(e).__name__}), not checked")
         if verdicts:

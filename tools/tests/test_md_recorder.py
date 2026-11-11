@@ -431,6 +431,16 @@ class RecorderTests(unittest.TestCase):
             return 0
         return sum(1 for f in os.listdir(d) for _, p in md.read_file(os.path.join(d, f)) if p.startswith('#{"ev":"stats"'))
 
+    def test_c13_preflight_drops_only_on_an_authoritative_answer(self):
+        logs = []
+        odd = list(BITGET_ODD) + list(BINANCE_ODD)
+        keep = md.preflight(["BTCUSDT", "ONLYBNUSDT"] + odd, self.ctx, binance=("127.0.0.1", self.mock.port),
+                            bitget=("127.0.0.1", self.mock.port), log=logs.append)
+        self.assertEqual(keep, ["BTCUSDT"] + odd)                 # transient / unknown answers never drop a symbol
+        self.assertTrue(any("ONLYBNUSDT" in l and "DROP" in l for l in logs))
+        for s in odd:
+            self.assertTrue(any(s in l and "not checked" in l for l in logs), s)
+
     def test_preflight_keeps_only_symbols_trading_on_both(self):
         logs = []
         keep = md.preflight(["BTCUSDT", "ETHUSDT", "OLDUSDT", "ONLYBGUSDT", "ONLYBNUSDT", "HALTUSDT"], self.ctx,
