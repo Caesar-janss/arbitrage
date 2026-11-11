@@ -21,7 +21,9 @@ bash tools/install_md_recorder_service.sh                 # pasang sebagai servi
 - Service ditulis ke `/etc/systemd/system/md-recorder.service` dan dijalankan sebagai user Anda. Exit code 2 (tidak ada
   simbol yang aktif di kedua venue) dan 3 (disk hampir penuh) **tidak** di-restart.
 - Log langsung: `journalctl -u md-recorder -f` (Ctrl+C hanya keluar dari log, rekaman jalan terus).
-- Cek isi rekaman kapan saja: `python3 tools/md_recorder.py --verify ~/md`.
+- Cek isi rekaman kapan saja: `python3 tools/md_recorder.py --verify ~/md --last-hours 2` (hanya file 2 jam terakhir,
+  beberapa detik). Tanpa `--last-hours` semua file dibaca: ~300.000 baris/detik, kira-kira 20 detik per jam rekaman,
+  jadi setelah berhari-hari bisa makan waktu lama; jangan di-Ctrl+C, biarkan selesai.
 - Berhenti: `sudo systemctl stop md-recorder`. Data tetap di `~/md`.
 
 ### Status line (setiap 60 detik)
