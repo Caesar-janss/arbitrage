@@ -554,6 +554,23 @@ class FileAndParseTests(unittest.TestCase):
         self.assertAlmostEqual(rep["coverage"], 0.5)
         self.assertEqual(rep["streams"]["ethusdt@trade"]["n"], 0)
 
+    def test_bitget_trade_snapshot_on_subscribe_is_not_counted_as_data_age(self):
+        # First md-tokyo run: Bitget answers a trade subscription with a snapshot of recent (minutes old) trades, which
+        # showed up as "data age p99 113 s". Only live updates measure how old data is when it arrives.
+        S = 10**9
+        t = 1_800_000_000 * S
+        ms = t // 10**6
+        arg = '"arg":{"instType":"SPOT","channel":"trade","instId":"OPUSDT"}'
+        w = md.HourlyWriter(self.dir, "bitget-0", flush_s=0)
+        w.meta(t, "start", streams=["trade:opusdt"])
+        w.meta(t, "connect")
+        w.write(t + S, '{"action":"snapshot",' + arg + f',"data":[{{"ts":"{ms - 170_000}"}}],"ts":{ms}}}')
+        w.write(t + 2 * S, '{"action":"update",' + arg + f',"data":[{{"ts":"{ms + 2_000 - 12}"}}],"ts":{ms + 2_000}}}')
+        w.close()
+        s = md.verify_conn(os.path.join(self.dir, "bitget-0"))["streams"]["trade:opusdt"]
+        self.assertEqual(s["n"], 2)                               # still counted as messages
+        self.assertEqual(s["lag_p99_ms"], 12)                     # was 171012
+
     def test_a_crashed_run_counts_as_downtime_until_the_next_connect(self):
         S = 10**9
         t = 1_800_000_000 * S

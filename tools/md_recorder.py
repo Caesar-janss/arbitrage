@@ -614,6 +614,8 @@ def verify_conn(dirpath: str) -> dict:
             if prev is not None and ns - prev > gap_by.get(key, 0):
                 gap_by[key] = ns - prev
             last_by[key] = ns
+            if venue == "bitget" and key.startswith("trade:") and payload.startswith('{"action":"snapshot"'):
+                continue                                   # trade history replayed on subscribe: old by design, not lag
             m = (_E if venue == "binance" else _TS).search(payload)
             if m:
                 lag.setdefault(key, Counter())[round(ns / 1e6 - int(m[1]))] += 1
