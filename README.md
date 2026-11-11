@@ -9,6 +9,7 @@ Multi-Strategy Crypto Arbitrage Engine (Spatial + Funding Rate) — .NET 8 + Pos
 | 1 ✅ | `Arb.Core`: pricing, order book seqlock, state machine, risk, inventory (323 test, 0 B/op hot path). Review 4 ronde: 33 laporan (Claude-R 20, ChatGPT 10 termasuk 4 duplikat, builder 3), semua S1/S2 di-fix dengan regression merah→hijau. **DITUTUP 2026-11-02 (persetujuan Jansen setelah recheck menyeluruh)** | `docs/STAGE1_CORE.md`, `docs/review/FINDINGS_LOG.md`, `docs/review/stage1/REGRESSION_LOG.md` |
 | S0 ✅ | Probe latency 24 jam Tokyo vs Singapura → **opsi (a)**: spatial Binance ↔ Bitget dari Tokyo, Bybit untuk funding/hedge (merge PR #5 = keputusan Jansen) | `docs/S0_LATENCY_PROBE.md`, `docs/S0_RESULTS.md` |
 | **2** | **Langkah 1 (sekarang): rekam market data Binance + Bitget di Tokyo, `python3 tools/md_recorder.py`** → langkah 2: ukur peluang nyata dari rekaman → baru adapter order entry; wajib membuktikan kewajiban I-1…I-3 (STAGE1_CORE §6.1) | `docs/STAGE2_RECORDER.md` |
+| 2 (paralel) | Spread scanner 8 venue (Binance, Bitget, Bybit, OKX, MEXC, Gate, KuCoin, Kraken), snapshot tiap 5 s: pasangan venue & koin mana yang selisihnya lolos fee dan bertahan, `python3 tools/spread_scanner.py` | `docs/STAGE2_SCANNER.md` |
 
 ## Struktur
 ```
