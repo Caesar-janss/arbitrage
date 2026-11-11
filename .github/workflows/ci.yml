@@ -79,8 +79,19 @@ jobs:
       PGUSER: postgres
     steps:
       - uses: actions/checkout@v4
-      - name: Install psql client
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+      - name: psql client from the postgres:16 image (no apt)
+        # Since 2026-11-11 ubuntu-latest (26.04 "resolute") could not resolve security.ubuntu.com, so the apt install
+        # failed and main went red with no code change. The service already pulled postgres:16, which ships psql 16
+        # (same major as the server): run it with host networking and the workspace mounted at the same path.
+        run: |
+          mkdir -p "$HOME/bin"
+          cat > "$HOME/bin/psql" <<'SH'
+          #!/usr/bin/env bash
+          exec docker run --rm -i --network host -e PGHOST -e PGPORT -e PGUSER -v "$PWD:$PWD" -w "$PWD" postgres:16 psql "$@"
+          SH
+          chmod +x "$HOME/bin/psql"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/psql" --version
       - name: Migrations + scenario tests
         run: bash db/tests/run_tests.sh | tail -n 40
 
