@@ -338,10 +338,14 @@ class HourlyWriter:
 class ConnRecorder(threading.Thread):
     def __init__(self, spec: ConnSpec, writer: HourlyWriter, ctx: ssl.SSLContext, stop: threading.Event,
                  stale_s: float = 30.0, timeout: float = 10.0, backoff: tuple[float, float] = (1.0, 60.0),
-                 poll_s: float = 0.5, log: Callable[[str], None] = print):
+                 poll_s: float = 0.5, log: Callable[[str], None] = print, stats_s: float = 60.0):
         super().__init__(name=spec.name, daemon=True)
         self.spec, self.writer, self.ctx, self.stop = spec, writer, ctx, stop
         self.stale_s, self.timeout, self.backoff, self.poll_s, self.log = stale_s, timeout, backoff, poll_s, log
+        self.stats_s = stats_s
+        self._st_reads: list[int] = []       # messages per socket read
+        self._st_lag: list[int] = []         # µs from a poll's first read stamp to the end of writing that poll's batch
+        self._st_t0 = time.monotonic()
         self.connected = False
         self.sessions = 0
         self.msgs = 0
@@ -389,17 +393,14 @@ class ConnRecorder(threading.Thread):
                              session=self.sessions)
             for i, sub in enumerate(self.spec.subscribe):
                 if i:
-                    time.sleep(0.15)
+                    self._pump(ws, 0.15)                    # keep reading (and stamping) while pacing requests
                 ws.send_text(sub)
             last_data = last_ka = time.monotonic()
             while not self.stop.is_set():
-                msgs = ws.poll(self.poll_s)
+                batch = ws.poll_stamped(self.poll_s)
                 now = time.monotonic()
-                if msgs:
-                    ns = time.time_ns()
-                    for text in msgs:
-                        if self._on_text(ns, text):
-                            last_data = now
+                if batch and self._deliver(batch):
+                    last_data = now
                 if self.spec.keepalive and now - last_ka >= self.spec.keepalive_s:
                     ws.send_text(self.spec.keepalive)
                     last_ka = now
@@ -407,6 +408,43 @@ class ConnRecorder(threading.Thread):
                     raise _Stale(f"no market data for {self.stale_s:.0f} s")
         finally:
             ws.close()
+
+    def _pump(self, ws: PollingWs, seconds: float) -> None:
+        end = time.monotonic() + seconds
+        while not self.stop.is_set():
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            batch = ws.poll_stamped(left)
+            if batch:
+                self._deliver(batch)
+
+    def _deliver(self, batch: list[tuple[int, str]]) -> bool:
+        """Write one poll's messages with their read stamps; measure how long that held up the next read (C-12)."""
+        data = False
+        for ns, text in batch:
+            if self._on_text(ns, text):
+                data = True
+        self._st_lag.append((time.time_ns() - batch[0][0]) // 1000)
+        run, prev = 0, batch[0][0]
+        for ns, _ in batch:
+            if ns != prev:
+                self._st_reads.append(run)
+                run, prev = 0, ns
+            run += 1
+        self._st_reads.append(run)
+        if time.monotonic() - self._st_t0 >= self.stats_s:
+            self._write_stats()
+        return data
+
+    def _write_stats(self) -> None:
+        reads, lag = sorted(self._st_reads), sorted(self._st_lag)
+        if reads:
+            pick = lambda xs, q: xs[min(len(xs) - 1, max(0, -(-len(xs) * q // 100) - 1))]  # noqa: E731 nearest rank
+            self.writer.meta(time.time_ns(), "stats", s=round(time.monotonic() - self._st_t0, 1), reads=len(reads),
+                             msgs=sum(reads), batch_p99=pick(reads, 99), batch_max=reads[-1], lag_p50_us=pick(lag, 50),
+                             lag_p99_us=pick(lag, 99), lag_max_us=lag[-1])
+        self._st_reads, self._st_lag, self._st_t0 = [], [], time.monotonic()
 
     def _on_text(self, ns: int, text: str) -> bool:
         kind, key = classify(self.spec.venue, text)
@@ -504,12 +542,12 @@ def clock_status() -> dict:
 def record(specs: list[ConnSpec], out: str, ctx: ssl.SSLContext, stop: threading.Event, hours: Optional[float] = None,
            status_s: float = 60.0, min_free_gb: float = 5.0, stale_s: float = 30.0, poll_s: float = 0.5,
            free_bytes: Callable[[str], int] = lambda p: shutil.disk_usage(p).free,
-           log: Callable[[str], None] = print, flush_s: float = 5.0) -> int:
+           log: Callable[[str], None] = print, flush_s: float = 5.0, stats_s: float = 60.0) -> int:
     os.makedirs(out, exist_ok=True)
     clock = {"v": clock_status(), "t": time.monotonic()}
     header = lambda: {"host": socket.gethostname(), **clock["v"]}  # noqa: E731
     recs = [ConnRecorder(s, HourlyWriter(out, s.name, flush_s=flush_s, header=header), ctx, stop, stale_s=stale_s,
-                         poll_s=poll_s, log=log) for s in specs]
+                         poll_s=poll_s, log=log, stats_s=stats_s) for s in specs]
     for r in recs:
         r.start()
     end = time.monotonic() + hours * 3600 if hours else None
@@ -609,7 +647,8 @@ def verify_conn(dirpath: str) -> dict:
     files = sorted((f for f in os.listdir(dirpath) if f.endswith(".tsv.gz")), key=_file_key)
     rep = {"conn": os.path.basename(dirpath), "files": len(files), "truncated": 0, "lines": 0, "data": 0,
            "bytes": sum(os.path.getsize(os.path.join(dirpath, f)) for f in files), "first_ns": None, "last_ns": None,
-           "sessions": 0, "down_s": 0.0, "errors": 0, "streams": {}, "expected": [], "reasons": Counter()}
+           "sessions": 0, "down_s": 0.0, "errors": 0, "streams": {}, "expected": [], "reasons": Counter(),
+           "reader": {"minutes": 0, "reads": 0, "msgs": 0, "batch_max": 0, "lag_p99_us": None, "lag_max_us": None}}
     venue = "binance" if rep["conn"].startswith("binance") else "bitget"
     last_by: dict = {}
     gap_by: dict = {}
@@ -629,6 +668,16 @@ def verify_conn(dirpath: str) -> dict:
                 except ValueError:
                     continue
                 ev = m.get("ev")
+                if ev == "stats":
+                    rd = rep["reader"]
+                    rd["minutes"] += 1
+                    rd["reads"] += int(m.get("reads", 0))
+                    rd["msgs"] += int(m.get("msgs", 0))
+                    rd["batch_max"] = max(rd["batch_max"], int(m.get("batch_max", 0)))
+                    for k in ("lag_p99_us", "lag_max_us"):
+                        if m.get(k) is not None:
+                            rd[k] = max(rd[k] or 0, int(m[k]))
+                    continue
                 if ev == "start":
                     rep["expected"] = sorted(set(rep["expected"]) | set(m.get("streams") or []))
                     if down_since is None and last_ns is not None:
@@ -697,6 +746,18 @@ def verify(roots: list[str]) -> tuple[str, list[dict]]:
                      + (f", **{len(silent)} stream TANPA data**: {', '.join(silent[:8])}" if silent else ""))
         for reason, n in r["reasons"].most_common(3):
             lines.append(f"  - putus {n}×: {reason}")
+    lines += ["", "## Reader lag (C-12)", "",
+              "Waktu dari stamp read pertama sebuah poll sampai batch itu selesai ditulis = berapa lama read berikutnya",
+              "tertahan oleh pemrosesan kita. Pesan dengan stamp yang sama berasal dari satu read: urutannya pasti, jaraknya tidak.",
+              "", "| Koneksi | Menit | Read | Pesan/read rata2 | Batch maks (pesan/read) | Lag p99 menit terburuk (µs) | Lag maks (µs) |",
+              "|---|---|---|---|---|---|---|"]
+    for r in reps:
+        rd = r["reader"]
+        if rd["minutes"]:
+            lines.append(f"| {r['conn']} | {rd['minutes']} | {rd['reads']:,} | {rd['msgs'] / max(rd['reads'], 1):.2f} | "
+                         f"{rd['batch_max']} | {rd['lag_p99_us']:,} | {rd['lag_max_us']:,} |")
+        else:
+            lines.append(f"| {r['conn']} | 0 | – | – | – | – | – |")
     lines += ["", "| Koneksi | Stream | Pesan | Pesan/s | Gap terpanjang (s) | Umur data p50 / p99 (ms) |", "|---|---|---|---|---|---|"]
     for r in reps:
         for k, s in r["streams"].items():

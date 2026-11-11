@@ -400,6 +400,31 @@ class RecorderTests(unittest.TestCase):
         self.assertIn("binance-0 UP", status[-1])
         self.assertIn("GB/day", status[-1])
 
+    def test_c12_subscribe_acks_are_read_while_later_subscribes_wait(self):
+        # Bitget subscribe requests go out 0.15 s apart. The ack of the first must be read (and stamped) during that
+        # wait, not after it: before the fix the thread slept and every byte that arrived meanwhile got a late stamp.
+        self.mock.reset()
+        spec = md.bitget_specs(["BTCUSDT", "ETHUSDT"], "127.0.0.1", self.mock.port, per_msg=3)[0]
+        self.assertEqual(len(spec.subscribe), 2)
+        def acks():
+            d = os.path.join(self.out, "bitget-0")
+            return [ns for f in (sorted(os.listdir(d), key=md._file_key) if os.path.isdir(d) else [])
+                    for ns, p in md.read_file(os.path.join(d, f)) if md.classify("bitget", p)[0] == "ack"]
+        self._record([spec], lambda: len(acks()) >= 6)
+        acks = acks()
+        self.assertEqual(len(acks), 6)
+        late_ms = (acks[0] - self.mock.bitget_sub_ns[0]) / 1e6        # mock answers the instant a request arrives
+        self.assertLess(late_ms, 75, f"first ack stamped {late_ms:.0f} ms after it was sent")   # before fix: ~150
+
+    def test_c12_reader_lag_is_measured_and_reported(self):
+        self.mock.reset()
+        self._record(self._specs()[:1], lambda: self._stats_lines("binance-0") >= 2, stats_s=0.3)
+        rep = md.verify_conn(os.path.join(self.out, "binance-0"))
+        self.assertGreater(rep["reader"]["reads"], 0)
+        self.assertGreaterEqual(rep["reader"]["batch_max"], 1)
+        self.assertIsNotNone(rep["reader"]["lag_p99_us"])
+        self.assertIn("Reader lag", md.verify([self.out])[0])
+
     def _stats_lines(self, conn: str) -> int:
         d = os.path.join(self.out, conn)
         if not os.path.isdir(d):
@@ -507,6 +532,51 @@ class PollingWsUnitTests(unittest.TestCase):
         with self.assertRaises(lp.WsError):
             for _ in range(5):
                 ws.poll(0.1)
+
+    def test_c12_slow_writing_does_not_move_the_stamps(self):
+        # The stamp is the read time. Writing a batch slowly must not spread its messages over the writing time.
+        class SlowWriter:
+            def __init__(self):
+                self.rows = []
+
+            def write(self, ns, payload):
+                time.sleep(0.02)
+                self.rows.append((ns, payload))
+
+            def meta(self, *a, **k):
+                pass
+        w = SlowWriter()
+        rec = md.ConnRecorder(md.ConnSpec("binance-0", "binance", "x", 0, "/", []), w, None, threading.Event())
+        t0 = time.time_ns()
+        rec._deliver([(t0, '{"stream":"a@trade","data":{}}'), (t0, '{"stream":"b@trade","data":{}}'),
+                      (t0 + 5, '{"stream":"c@trade","data":{}}')])
+        self.assertEqual([ns for ns, _ in w.rows], [t0, t0, t0 + 5])
+        self.assertEqual(rec._st_reads, [2, 1])                  # two reads: 2 messages, then 1
+        self.assertGreaterEqual(rec._st_lag[0], 50_000)          # µs: the ~60 ms spent writing is measured as lag
+
+    def test_c12_a_frame_already_buffered_is_returned_without_waiting(self):
+        ws, peer = self._pair()
+        ws._rbuf = bytearray(_frame(0x1, b"early"))
+        t = time.monotonic()
+        got = ws.poll(0.5)
+        self.assertEqual(got, ["early"])
+        self.assertLess(time.monotonic() - t, 0.1)               # 98901fb-era code waited the full 0.5 s
+
+    def test_c12_each_message_is_stamped_at_the_read_that_completed_it(self):
+        ws, peer = self._pair()
+        b = _frame(0x1, b"B")
+        peer.sendall(_frame(0x1, b"A") + b[:2])                 # A complete, B only its header
+        first = ws.poll_stamped(0.5)
+        time.sleep(0.05)
+        peer.sendall(b[2:])
+        second = ws.poll_stamped(0.5)
+        self.assertEqual([m for _, m in first], ["A"])
+        self.assertEqual([m for _, m in second], ["B"])
+        self.assertGreaterEqual(second[0][0] - first[0][0], 40_000_000)
+        before = time.time_ns()
+        peer.sendall(_frame(0x1, b"C"))
+        (ns, m), = ws.poll_stamped(0.5)
+        self.assertTrue(before <= ns <= time.time_ns())
 
     def test_peer_eof_raises(self):
         ws, peer = self._pair()
