@@ -175,7 +175,25 @@ class AnalysisTests(unittest.TestCase):
              "c": snap({"X": [300.0, 5, 300.1, 5]})}
         a = sc.analyse(write_rounds(self.dir, [r, r, r]), FEES | {"a": 10, "b": 10, "c": 10})
         self.assertEqual(a["episodes"], [])
-        self.assertEqual(a["suspect_bases"]["X"], 3)
+        self.assertEqual(a["suspect_bases"]["X@c"], 3)
+
+    def test_only_the_outlier_venue_is_dropped_when_the_others_agree(self):
+        # First md-tokyo run: RON on Bitget ~1640x the price on MEXC/OKX showed as "+16,410,477 bps" in the live view.
+        # The outlier must go, but a real gap between the venues that agree must still be measured.
+        rounds = [{"a": snap({"X": [99.9, 5, 100.0, 5]}), "b": snap({"X": [100.3 + i * .01, 5, 100.4 + i * .01, 5]}),
+                   "c": snap({"X": [164000.0, 5, 164001.0, 5]})} for i in range(3)]
+        a = sc.analyse(write_rounds(self.dir, rounds), {"a": 10, "b": 10, "c": 10})
+        (ep,) = a["episodes"]
+        self.assertEqual((ep.buy, ep.sell, ep.rounds), ("a", "b", 3))
+        self.assertEqual(a["suspect_bases"]["X@c"], 3)
+        live = sc.live_top(rounds[0], {"a": 10, "b": 10, "c": 10}, 3)
+        self.assertEqual(len(live), 1)
+        self.assertIn("X buy a→sell b", live[0])
+
+    def test_two_venues_that_disagree_are_both_dropped(self):
+        r = {"a": snap({"X": [99.9, 5, 100.0, 5]}), "b": snap({"X": [149.9, 5, 150.0, 5]})}
+        self.assertEqual(sc.suspect_quotes(r, 0.10), {("X", "a"), ("X", "b")})
+        self.assertEqual(sc.live_top(r, {"a": 10, "b": 10}, 3), [])
 
     def test_long_lived_gaps_are_flagged_not_counted(self):
         rounds = [{"a": snap({"X": [99.9, 5, 100.0, 5]}), "b": snap({"X": [100.3 + i * 1e-4, 2, 100.5, 2]})} for i in range(200)]

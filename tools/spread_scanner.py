@@ -334,7 +334,7 @@ def scan(venues: list[Venue], out: str, ctx: ssl.SSLContext, stop: threading.Eve
 
 def live_top(snaps: dict, fees: dict, n: int, min_usd: float = 50.0) -> list[str]:
     rows = []
-    for g in pair_gaps(snaps, fees):
+    for g in pair_gaps(snaps, fees, suspect_quotes(snaps, 0.10)):          # same identity filter as the report
         if g[5] is not None and g[5] >= min_usd and g[3] >= 0:
             rows.append(g)
     rows.sort(key=lambda g: -g[3])
@@ -342,27 +342,35 @@ def live_top(snaps: dict, fees: dict, n: int, min_usd: float = 50.0) -> list[str
 
 
 # ── analysis ───────────────────────────────────────────────────────────────────────────────────────────────────────
-def suspect_bases(snaps: dict, max_dev: float) -> set:
-    """Bases where some venue's mid is more than max_dev away from the median of all venues' mids (identity/frozen)."""
+def suspect_quotes(snaps: dict, max_dev: float) -> set:
+    """
+    (base, venue) quotes whose mid is more than max_dev away from the median of all venues' mids for that base: usually
+    a different token behind the same ticker, or a dead market. Only the outliers are dropped when the venues that agree
+    are a majority (>= 2 and more than the outliers); otherwise nobody can tell which side is right and the whole base
+    is dropped for that snapshot.
+    """
     mids = defaultdict(list)
-    for s in snaps.values():
+    for name, s in snaps.items():
         for b, r in (s.get("q") or {}).items():
-            mids[b].append((r[0] + r[2]) / 2)
+            mids[b].append((name, (r[0] + r[2]) / 2))
     bad = set()
     for b, ms in mids.items():
-        if len(ms) >= 2:
-            med = statistics.median(ms)
-            if any(abs(m / med - 1) > max_dev for m in ms):
-                bad.add(b)
+        if len(ms) < 2:
+            continue
+        med = statistics.median(m for _, m in ms)
+        out = {n for n, m in ms if abs(m / med - 1) > max_dev}
+        if out:
+            agree = len(ms) - len(out)
+            bad |= {(b, n) for n, _ in ms} if agree < 2 or agree <= len(out) else {(b, n) for n in out}
     return bad
 
 
-def pair_gaps(snaps: dict, fees: dict, skip: frozenset = frozenset()):
+def pair_gaps(snaps: dict, fees: dict, skip: frozenset | set = frozenset()):
     """Yield (base, buy_venue, sell_venue, net_bps, gross_bps, top_of_book_usd | None) for every ordered venue pair."""
     by_base = defaultdict(list)
     for name, s in snaps.items():
         for b, r in (s.get("q") or {}).items():
-            if b not in skip:
+            if (b, name) not in skip:
                 by_base[b].append((name, r))
     for b, rows in by_base.items():
         if len(rows) < 2:
@@ -437,19 +445,19 @@ def analyse(files: list[str], fees: dict, min_net_bps: float = 0.0, min_usd: flo
                     venue_ms[n].append((s["t1"] - s["t0"]) / 1e6)
                 else:
                     venue_fail[n] += 1
-            bad = suspect_bases(snaps, max_dev)
-            for b in bad:
-                suspects[b] += 1
+            bad = suspect_quotes(snaps, max_dev)
+            for b, n in bad:
+                suspects[f"{b}@{n}"] += 1
             names = sorted(live)
             for i, a in enumerate(names):
                 for s in names[i + 1:]:
                     qa, qs = snaps[a]["q"], snaps[s]["q"]
                     for b in REFERENCE_BASES:
-                        if b in qa and b in qs and b not in bad:
+                        if b in qa and b in qs and (b, a) not in bad and (b, s) not in bad:
                             ma, ms_ = (qa[b][0] + qa[b][2]) / 2, (qs[b][0] + qs[b][2]) / 2
                             ref[(a, s)].append(abs(ma / ms_ - 1) * 1e4)
             hit = set()
-            for b, a, s, net, gross, size in pair_gaps(snaps, fees, frozenset(bad)):
+            for b, a, s, net, gross, size in pair_gaps(snaps, fees, bad):
                 if net < min_net_bps or (size is not None and size < min_usd):
                     continue
                 key = (b, a, s)
@@ -550,7 +558,7 @@ def report(a: dict) -> str:
         n = sum(ex.values())
         lines.append(f"| {expl[k]} | {n:,} | {', '.join(f'{x} ({c})' for x, c in ex.most_common(4)) or '–'} |")
     sb = a["suspect_bases"].most_common(10)
-    lines += ["", f"Koin dengan harga mid > {p['max_dev'] * 100:g} % dari median venue lain (dikeluarkan per snapshot; "
+    lines += ["", f"Kutipan koin@venue dengan mid > {p['max_dev'] * 100:g} % dari median venue lain (dikeluarkan per snapshot; "
               "biasanya token berbeda dengan ticker sama): " + (", ".join(f"{b} ({c})" for b, c in sb) or "–")]
     return "\n".join(lines)
 
