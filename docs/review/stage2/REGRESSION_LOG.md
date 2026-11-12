@@ -18,3 +18,19 @@ perubahan kode: **42 tes, 9 failures + 3 errors, semuanya tes baru**; 30 tes lam
 
 Sesudah semua commit: 13 mutan semula PR #6 dijalankan ulang, 13/13 tertangkap. Stress 30/30 (10 suite paralel).
 Benchmark: `tools/tests/bench_md_recorder.py` (lihat `docs/STAGE2_RECORDER.md` §4).
+
+## Audit builder 2026-11-12 (Fable) — basis `5d45923`
+
+Tes ditambahkan dulu, dijalankan terhadap basis: 77 tes, 8 error (semua tes baru; API belum ada). Dua temuan dengan
+perilaku salah yang terukur di basis: B-06 (`{'ok': 50}`, $35.769/hari untuk satu selisih 6 % yang menetap 25 menit) dan
+B-07 (1 episode 3.000 ronde menyimpan 3.000 + 3.000 sampel dan 50 leg).
+
+| Temuan | Tes | Mutan tertangkap |
+|---|---|---|
+| B-06 S2 | `test_b06_a_persistent_gap_broken_up_by_fetch_failures_is_not_many_ok_episodes`, `test_b06_short_gaps_that_recur_a_few_times_stay_tradable` | 1/1: tanpa aturan per jam |
+| B-07 S2 | `test_b07_a_very_long_episode_keeps_bounded_state` | 3/3: sampel tak terbatas, leg tak terbatas, sampel tidak dibebaskan |
+| B-08 S3 | `test_b08_one_dead_book_stream_forces_a_reconnect`, `test_b08_a_quiet_trade_stream_is_not_a_dead_stream`, `test_b08_stream_watchdog_backs_off_and_recovers` | 5/5: watchdog tidak pernah menyala, trade ikut diawasi, batas tidak menggandakan, batas tidak pulih, last-seen tidak diperbarui |
+| B-09 S3 | `test_b09_a_dead_connection_thread_ends_the_process_with_an_error` | 1/1: thread mati diabaikan |
+| B-10 S3 | `test_b10_report_shows_direction_balance_and_quote_freshness`, `test_b10_direction_share_names_the_side_that_dominates` | 2/2 (mutan "arah mengabaikan sisi" sempat lolos → tes dua arah ditambah) |
+
+Sesudah fix: 78 tes hijau (28 scanner, 40 recorder, 10 probe), stress 30/30 (10 suite paralel).

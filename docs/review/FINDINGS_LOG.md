@@ -113,6 +113,18 @@ ditegakkan di `TradeGroup`, bukan panggilan host opsional.
 | B-04 | S4 | Harness tes S0 (`test_latency_probe.py` `MockVenue.stop`) | listener ditutup saat acceptor masih bisa `accept()` di nomor fd yang dipakai ulang → mock lama melayani koneksi tes lain (flaky) | CONFIRMED | spy handshake: respons tanpa header `X-Mock: md`; 6–16/30 gagal di 10 suite paralel → 50/50 lulus sesudah fix | commit recorder (`docs/STAGE2_RECORDER.md` §5) |
 | B-05 | S3 | `md_recorder.ConnRecorder.run` | exception di luar daftar (bug, payload tak terduga) mematikan thread koneksi selamanya; proses dan systemd tetap "sehat" | CONFIRMED | ditemukan saat fix C-12 (TypeError karena bentrok nama dengan `threading.Thread._handle`); tes merah: 1 sesi | `603a80a` |
 
+### Builder — audit menyeluruh 2026-11-12 (Fable; kode yang sedang berjalan di md-tokyo)
+
+| ID | Sev | Area | Klaim (ringkas) | Status | Bukti | Fix |
+|---|---|---|---|---|---|---|
+| B-06 | S2 | `spread_scanner` laporan | selisih yang menetap (transfer ditutup) terpecah jadi banyak episode pendek "ok" oleh venue yang gagal di-fetch / selisih yang turun sesaat → peringkat $/hari didominasi jebakan | CONFIRMED | 25 menit selisih 6 % → 50 episode ok, $35.769/hari | PR audit: aturan "terbuka > N menit dalam satu jam" |
+| B-07 | S2 | `spread_scanner` laporan | state per episode tumbuh tiap snapshot dan tidak dibebaskan → laporan 72 jam bisa memakan memori VM dan memicu OOM killer terhadap recorder | CONFIRMED | 1 episode 3.000 ronde = 3.000 sampel ×2 + 50 leg | sampel ≤ 512, dibebaskan saat episode selesai, `--max-mem-gb`, nice 19 |
+| B-08 | S3 | `md_recorder.ConnRecorder` | satu stream book mati sementara koneksi hidup tidak pernah pulih (hanya baris WARN di journal) | CONFIRMED | mock: 1 dari 6 stream bisu, 1 sesi selamanya | watchdog per stream → reconnect, backoff 2× sampai 16× |
+| B-09 | S3 | `md_recorder.record` | thread koneksi yang berakhir tidak terdeteksi; proses tetap jalan tanpa satu venue | CONFIRMED | thread mati (SystemExit) → exit code 0 setelah timeout | exit 1 → systemd restart |
+| B-10 | S3 | `spread_scanner` laporan | tidak ada arah dominan per pasangan (peluang searah tidak bisa diulang) dan tidak ada indikator ticker REST basi | CONFIRMED | — | dua kolom baru + catatan hitung ganda |
+
+Temuan non-kode dari audit yang sama (strategi, operasi): `docs/AUDIT_2026-11-12.md`.
+
 ### ChatGPT — Tahap 2 ronde 1 (review post-merge PR #6 [6799546635](https://github.com/Caesar-janss/arbitrage/pull/6#issuecomment-6799546635) @ `4acb424`)
 
 | ID | Sev | Area | Klaim (ringkas) | Status | Bukti triase | Fix |
