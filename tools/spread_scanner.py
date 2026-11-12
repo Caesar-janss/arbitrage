@@ -49,6 +49,7 @@ import md_recorder as md  # noqa: E402  (HourlyWriter, read_file, verify-style h
 
 QUOTE = "USDT"
 EXIT_DISK_FULL = 3
+EP_SAMPLES = 512        # per-episode samples kept for medians; an episode never grows beyond this (B-07)
 
 # Base-tier SPOT taker fees in basis points. ASSUMPTIONS from public fee pages as remembered, not re-verified: check
 # each venue's current schedule (and your own tier / discounts) before acting on a report. --fee overrides.
@@ -228,6 +229,14 @@ class Fetcher:
                 if attempt == 2:
                     raise RuntimeError(f"{type(e).__name__}: {e}") from e
 
+    def close(self) -> None:
+        for c in list(self._conns.values()):
+            try:
+                c.close()
+            except OSError:
+                pass
+        self._conns.clear()
+
     def snapshot(self, v: Venue, quote: str, meta_every_s: float = 3600.0) -> dict:
         t0 = time.time_ns()
         try:
@@ -326,7 +335,8 @@ def scan(venues: list[Venue], out: str, ctx: ssl.SSLContext, stop: threading.Eve
             stop.wait(delay)
     finally:
         stop.set()
-        pool.shutdown(wait=False, cancel_futures=True)
+        pool.shutdown(wait=True, cancel_futures=True)      # in-flight fetches end within their socket timeout
+        fetcher.close()
         writer.meta(time.time_ns(), "stop")
         writer.close()
     return code
@@ -392,11 +402,22 @@ class Episode:
     start: int
     last: int
     rounds: int = 1
-    nets: list = field(default_factory=list)
+    nets: list = field(default_factory=list)                # first EP_SAMPLES net bps (for the median)
+    net_max: float = float("-inf")                          # exact over the whole episode
     best_usd: float = 0.0                                   # net profit if taken ONCE at the best snapshot, top of book only
-    sizes: list = field(default_factory=list)               # top-of-book USD per snapshot (min of both legs)
+    sizes: list = field(default_factory=list)               # first EP_SAMPLES top-of-book USD (min of both legs)
     size_known: bool = True
-    legs: set = field(default_factory=set)                  # distinct (buy ask, buy size, sell bid, sell size) seen
+    legs: set = field(default_factory=set)                  # at most 2 distinct (buy ask, buy size, sell bid, sell size)
+    net_med: float = 0.0                                    # set by seal(); the sample lists are then dropped
+    size_med: Optional[float] = None
+    legs_n: int = 0
+
+    def seal(self) -> None:
+        """Episode ended: keep the medians, free the samples (a 72 h report can hold millions of episodes)."""
+        self.net_med = statistics.median(self.nets) if self.nets else 0.0
+        self.size_med = statistics.median(self.sizes) if self.sizes else None
+        self.legs_n = len(self.legs)
+        self.nets, self.sizes, self.legs = [], [], set()
 
     def duration_s(self, interval: float) -> float:
         return (self.last - self.start) / 1e9 + interval
@@ -412,6 +433,9 @@ def analyse(files: list[str], fees: dict, min_net_bps: float = 0.0, min_usd: flo
     venue_ok, venue_fail, venue_ms = Counter(), Counter(), defaultdict(list)
     ref = defaultdict(list)                                 # (venueA, venueB) -> |mid diff| bps on REFERENCE_BASES
     suspects: Counter = Counter()
+    open_s: dict = defaultdict(float)                       # ((base, buy, sell), utc hour) -> seconds the gap was open
+    fresh: dict = defaultdict(lambda: [0, 0])               # venue -> [rounds its reference quote changed, rounds compared]
+    prev_ref: dict = {}
     blips: Counter = Counter()                              # one-snapshot gaps: counted, not kept (memory over weeks)
 
     def close(key):
@@ -419,6 +443,7 @@ def analyse(files: list[str], fees: dict, min_net_bps: float = 0.0, min_usd: flo
         if ep.rounds < min_rounds:
             blips[f"{ep.base} {ep.buy}→{ep.sell}"] += 1
         else:
+            ep.seal()
             done.append(ep)
 
     for f in files:
@@ -445,6 +470,14 @@ def analyse(files: list[str], fees: dict, min_net_bps: float = 0.0, min_usd: flo
                     venue_ms[n].append((s["t1"] - s["t0"]) / 1e6)
                 else:
                     venue_fail[n] += 1
+            for n in live:                                  # is this venue's REST ticker live or a slow cache?
+                q = snaps[n]["q"]
+                cur = next((tuple(q[b]) for b in REFERENCE_BASES if b in q), None)
+                if cur is not None:
+                    if n in prev_ref:
+                        fresh[n][1] += 1
+                        fresh[n][0] += cur != prev_ref[n]
+                    prev_ref[n] = cur
             bad = suspect_quotes(snaps, max_dev)
             for b, n in bad:
                 suspects[f"{b}@{n}"] += 1
@@ -468,12 +501,17 @@ def analyse(files: list[str], fees: dict, min_net_bps: float = 0.0, min_usd: flo
                     ep = open_eps[key] = Episode(b, a, s, t, t, 0)
                 ep.rounds += 1
                 ep.last = t
-                ep.nets.append(net)
-                ep.legs.add((ra[2], ra[3], rs[0], rs[1]))
+                ep.net_max = max(ep.net_max, net)
+                if len(ep.nets) < EP_SAMPLES:               # bounded: a gap open for days must not eat the VM's memory
+                    ep.nets.append(net)
+                if len(ep.legs) < 2:
+                    ep.legs.add((ra[2], ra[3], rs[0], rs[1]))
+                open_s[(key, t // HOUR_NS)] += interval
                 if size is None:
                     ep.size_known = False
                 else:
-                    ep.sizes.append(size)
+                    if len(ep.sizes) < EP_SAMPLES:
+                        ep.sizes.append(size)
                     ep.best_usd = max(ep.best_usd, net / 1e4 * size)
             for key in [k for k in open_eps if k not in hit]:   # ended, or one leg missing this round: no bridging
                 close(key)
@@ -482,29 +520,49 @@ def analyse(files: list[str], fees: dict, min_net_bps: float = 0.0, min_usd: flo
     span_days = max(((last - first) / 1e9 + interval) / 86400, 1e-9) if first is not None else 0.0
     return {"episodes": done, "rounds": rounds, "first": first, "last": last, "interval": interval,
             "span_days": span_days, "venue_ok": venue_ok, "venue_fail": venue_fail, "venue_ms": venue_ms, "ref": ref,
-            "suspect_bases": suspects, "blips": blips, "params": {"min_net_bps": min_net_bps, "min_usd": min_usd, "min_rounds": min_rounds,
+            "suspect_bases": suspects, "blips": blips, "open_s": open_s, "fresh": dict(fresh), "params": {"min_net_bps": min_net_bps, "min_usd": min_usd, "min_rounds": min_rounds,
                                                     "max_dev": max_dev, "suspect_minutes": suspect_minutes, "fees": fees}}
 
 
-def classify_episode(ep: Episode, interval: float, min_rounds: int, suspect_minutes: float) -> str:
+HOUR_NS = 3_600_000_000_000
+
+
+def classify_episode(ep: Episode, interval: float, min_rounds: int, suspect_minutes: float,
+                     open_s: Optional[dict] = None) -> str:
+    """
+    "long" = not tradable in practice: the gap lasted longer than suspect_minutes, OR this same (coin, buy, sell) gap was
+    open for more than suspect_minutes within one UTC hour (B-06). The second rule matters because an episode ends when a
+    venue misses one snapshot or the gap dips under the threshold for a moment: a gap that stays open all day (deposits
+    or withdrawals closed, a different token) would otherwise be counted as hundreds of short, "tradable" episodes.
+    """
     if ep.rounds < min_rounds:
         return "blip"                                       # one snapshot only: may be a timing artefact
-    if ep.duration_s(interval) > suspect_minutes * 60:
+    limit = suspect_minutes * 60
+    if ep.duration_s(interval) > limit:
         return "long"                                       # rarely tradable: transfers closed / identity / dead market
-    if ep.rounds >= 3 and len(ep.legs) == 1:
+    if open_s is not None:
+        key = (ep.base, ep.buy, ep.sell)
+        if any(open_s.get((key, h), 0.0) > limit for h in range(ep.start // HOUR_NS, ep.last // HOUR_NS + 1)):
+            return "long"
+    if ep.rounds >= 3 and ep.legs_n == 1:
         return "stale"                                      # neither quote moved at all: frozen book on one side
     if not ep.size_known:
         return "nosize"
     return "ok"
 
 
+def episode_kinds(a: dict) -> dict:
+    p, kinds = a["params"], defaultdict(list)
+    for ep in a["episodes"]:
+        kinds[classify_episode(ep, a["interval"], p["min_rounds"], p["suspect_minutes"], a.get("open_s"))].append(ep)
+    return kinds
+
+
 def report(a: dict) -> str:
     p, iv, days = a["params"], a["interval"], a["span_days"]
     if not a["rounds"]:
         return "# Spread scanner — tidak ada data\n"
-    kinds = defaultdict(list)
-    for ep in a["episodes"]:
-        kinds[classify_episode(ep, iv, p["min_rounds"], p["suspect_minutes"])].append(ep)
+    kinds = episode_kinds(a)
     ok = kinds["ok"]
     lines = ["# Spread scanner — laporan", "",
              f"{md.utc(a['first'])} → {md.utc(a['last'])} ({days * 24:.1f} jam, {a['rounds']:,} snapshot, interval {iv:g} s). "
@@ -513,33 +571,48 @@ def report(a: dict) -> str:
              "**Cara membaca:** $/hari = jumlah, per episode, profit bersih bila diambil SEKALI di snapshot terbaiknya, "
              "hanya sebesar ukuran top-of-book. Ini sinyal peringkat, bukan ramalan: pemain lain bisa lebih dulu "
              "(terlalu optimis), level book berikutnya tidak dihitung (terlalu pesimis). Fee = asumsi tier dasar.", "",
-             "## 1. Venue", "", "| Venue | Snapshot OK | Gagal | Waktu fetch p50 (ms) | Fee taker asumsi (bps) |",
-             "|---|---|---|---|---|"]
+             "## 1. Venue", "",
+             "| Venue | Snapshot OK | Gagal | Waktu fetch p50 (ms) | Fee taker asumsi (bps) | Kutipan koin besar berubah antar snapshot |",
+             "|---|---|---|---|---|---|"]
     for v in sorted(set(a["venue_ok"]) | set(a["venue_fail"])):
         ms = a["venue_ms"].get(v) or []
+        ch, n = a["fresh"].get(v, [0, 0])
+        fr = f"{100 * ch / n:.0f} %" if n else "–"
         lines.append(f"| {v} | {a['venue_ok'][v]:,} | {a['venue_fail'][v]:,} | {statistics.median(ms):.0f} |"
-                     f" {p['fees'].get(v, 10.0):g} |" if ms else f"| {v} | 0 | {a['venue_fail'][v]:,} | – | {p['fees'].get(v, 10.0):g} |")
+                     f" {p['fees'].get(v, 10.0):g} | {fr} |" if ms else f"| {v} | 0 | {a['venue_fail'][v]:,} | – | {p['fees'].get(v, 10.0):g} | {fr} |")
+    lines += ["", "Kolom terakhir: seberapa sering kutipan BTC (atau koin besar lain) venue itu berbeda dari snapshot sebelumnya. "
+              "Jauh di bawah 100 % = ticker REST venue itu cache yang lambat, sehingga selisih yang melibatkannya bisa semu."]
     pairs = defaultdict(list)
     for ep in ok:
         pairs[tuple(sorted((ep.buy, ep.sell)))].append(ep)
     lines += ["", "## 2. Peringkat pasangan venue (episode yang lolos semua filter)", "",
               "| Pasangan | $/hari | Episode/hari | Durasi median (s) | Net median (bps) | Ukuran median ($) | Koin berbeda | "
-              "Selisih mid BTC/ETH/SOL/XRP/DOGE p50 (bps) |", "|---|---|---|---|---|---|---|---|"]
+              "Selisih mid BTC/ETH/SOL/XRP/DOGE p50 (bps) | Arah dominan ($) |", "|---|---|---|---|---|---|---|---|---|"]
     rank = []
     for pr, eps in pairs.items():
         usd = sum(e.best_usd for e in eps) / days
         ref = a["ref"].get(pr) or []
         rank.append((usd, pr, eps, statistics.median(ref) if ref else None))
     for usd, pr, eps, ref in sorted(rank, key=lambda x: -x[0]):
-        sizes = [statistics.median(e.sizes) for e in eps if e.sizes]
+        sizes = [e.size_med for e in eps if e.size_med is not None]
+        by_dir = Counter()
+        for e in eps:
+            by_dir[f"{e.buy}→{e.sell}"] += e.best_usd
+        (dom, dom_usd), tot = by_dir.most_common(1)[0], sum(by_dir.values())
+        direction = f"{100 * dom_usd / tot:.0f} % {dom}" if tot > 0 else "–"
         lines.append(f"| {pr[0]} ↔ {pr[1]} | {usd:,.2f} | {len(eps) / days:,.1f} | "
-                     f"{statistics.median(e.duration_s(iv) for e in eps):.0f} | {statistics.median(statistics.median(e.nets) for e in eps):.1f} | "
-                     f"{statistics.median(sizes):,.0f} | {len({e.base for e in eps})} | {'–' if ref is None else f'{ref:.1f}'} |"
-                     if sizes else f"| {pr[0]} ↔ {pr[1]} | {usd:,.2f} | {len(eps) / days:,.1f} | – | – | – | {len({e.base for e in eps})} | – |")
+                     f"{statistics.median(e.duration_s(iv) for e in eps):.0f} | {statistics.median(e.net_med for e in eps):.1f} | "
+                     f"{statistics.median(sizes):,.0f} | {len({e.base for e in eps})} | {'–' if ref is None else f'{ref:.1f}'} | {direction} |"
+                     if sizes else f"| {pr[0]} ↔ {pr[1]} | {usd:,.2f} | {len(eps) / days:,.1f} | – | – | – | {len({e.base for e in eps})} | – | {direction} |")
     if not rank:
-        lines.append("| (tidak ada episode yang lolos) | | | | | | | |")
+        lines.append("| (tidak ada episode yang lolos) | | | | | | | | |")
     lines += ["", "Pasangan tanpa episode tidak tercantum. Selisih mid koin besar = seberapa ketat dua venue terhubung "
               "(kecil = efisien, peluang jarang).", "",
+              "**Arah dominan** mendekati 100 % = hampir semua peluang searah (selalu beli di venue yang sama). Tanpa transfer "
+              "antar venue, stok koin di sisi jual dan USDT di sisi beli habis setelah beberapa trade, jadi $/hari TIDAK bisa "
+              "diulang: batasnya modal dan kecepatan rebalancing. Mendekati 50 % = peluang dua arah, stok kembali sendiri.",
+              "**$/hari menghitung ganda** likuiditas yang sama bila satu venue menyimpang terhadap beberapa venue sekaligus: "
+              "bandingkan antar pasangan, jangan dijumlahkan.", "",
               "## 3. Koin teratas (semua pasangan)", "", "| Koin | Beli di → jual di | $/hari | Episode | Durasi median (s) | Net maks (bps) |",
               "|---|---|---|---|---|---|"]
     per = defaultdict(list)
@@ -548,10 +621,10 @@ def report(a: dict) -> str:
     top = sorted(per.items(), key=lambda kv: -sum(e.best_usd for e in kv[1]))[:25]
     for (b, x, y), eps in top:
         lines.append(f"| {b} | {x} → {y} | {sum(e.best_usd for e in eps) / days:,.2f} | {len(eps)} | "
-                     f"{statistics.median(e.duration_s(iv) for e in eps):.0f} | {max(max(e.nets) for e in eps):.1f} |")
+                     f"{statistics.median(e.duration_s(iv) for e in eps):.0f} | {max(e.net_max for e in eps):.1f} |")
     lines += ["", "## 4. Dibuang (kemungkinan TIDAK bisa diambil)", "",
               "| Jenis | Episode | Contoh |", "|---|---|---|"]
-    expl = {"blip": f"hanya 1 snapshot (bisa artefak waktu fetch)", "long": f"> {p['suspect_minutes']:g} menit (biasanya transfer ditutup / token beda / pasar mati)",
+    expl = {"blip": f"hanya 1 snapshot (bisa artefak waktu fetch)", "long": f"terbuka > {p['suspect_minutes']:g} menit, sekali jalan atau total dalam satu jam (biasanya transfer ditutup / token beda / pasar mati)",
             "stale": "harga kedua sisi tidak berubah sama sekali (book beku)", "nosize": "venue tidak memberi ukuran top-of-book"}
     for k in ("blip", "long", "stale", "nosize"):
         ex = a["blips"] if k == "blip" else Counter(f"{e.base} {e.buy}→{e.sell}" for e in kinds[k])
@@ -584,6 +657,7 @@ def probe(venues: list[Venue], ctx: ssl.SSLContext, quote: str = QUOTE, log: Cal
         q = s["q"]
         sample = "; ".join(f"{b} bid {q[b][0]:g} ({q[b][1]}) ask {q[b][2]:g} ({q[b][3]})" for b in ("BTC", "ETH") if b in q)
         log(f"OK   {v.name:8s} {len(q):5d} {quote} pairs in {(s['t1'] - s['t0']) / 1e6:5.0f} ms | {sample}")
+    f.close()
     return 1 if bad else 0
 
 
@@ -602,6 +676,8 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--min-usd", type=float, default=50.0)
     ap.add_argument("--min-rounds", type=int, default=2)
     ap.add_argument("--suspect-minutes", type=float, default=10.0)
+    ap.add_argument("--max-mem-gb", type=float, default=3.0,
+                    help="with --report: give up instead of using more memory than this (protects the recorder on the same VM)")
     a = ap.parse_args(argv)
 
     fees = dict(FEES_BPS)
@@ -614,8 +690,18 @@ def main(argv: Optional[list] = None) -> int:
         if a.last_hours is not None and a.last_hours <= 0:
             ap.error("--last-hours must be > 0")
         since = time.time_ns() - int(a.last_hours * 3600e9) if a.last_hours else None
-        print(report(analyse(round_files(a.report, since), fees, a.min_net_bps, a.min_usd, a.min_rounds,
-                             suspect_minutes=a.suspect_minutes)))
+        try:                                                # B-07: the report must never push the recorder into the OOM killer
+            import resource
+            resource.setrlimit(resource.RLIMIT_AS, (int(a.max_mem_gb * (1 << 30)),) * 2)
+            os.nice(19)
+        except (ImportError, ValueError, OSError):
+            pass
+        try:
+            print(report(analyse(round_files(a.report, since), fees, a.min_net_bps, a.min_usd, a.min_rounds,
+                                 suspect_minutes=a.suspect_minutes)))
+        except MemoryError:
+            print(f"report needs more than --max-mem-gb {a.max_mem_gb:g}: use a smaller --last-hours", file=sys.stderr)
+            return 4
         return 0
     known = {v.name: v for v in default_venues()}
     names = [n.strip() for n in a.venues.split(",") if n.strip()]

@@ -106,7 +106,8 @@ class MockVenues:
         self._acceptor.start()
 
     def reset(self, **cfg):
-        self.cfg = {"close_after": None, "silent_after": None, "period_s": 0.004, "special": False, **cfg}
+        self.cfg = {"close_after": None, "silent_after": None, "period_s": 0.004, "special": False, "mute": (),
+                    "mute_after": 0, **cfg}
         self.binance_pongs: list[bytes] = []
         self.bitget_pings: list[float] = []
         self.bitget_subs: list[dict] = []
@@ -203,6 +204,9 @@ class MockVenues:
                 time.sleep(0.01)
                 continue
             s = streams[sent % len(streams)]
+            if s in self.cfg["mute"] and sent >= self.cfg["mute_after"]:   # this one stream goes dead, the rest flow
+                sent += 1
+                continue
             now = int(time.time() * 1000)
             body = {"e": "trade", "E": now - 3, "s": s.split("@")[0].upper(), "p": "1.0"} if s.endswith("@trade") else {"u": sent, "b": "1", "a": "2"}
             msg = json.dumps({"stream": s, "data": body}, separators=(",", ":")).encode()
@@ -402,6 +406,35 @@ class RecorderTests(unittest.TestCase):
         self.assertTrue(any("simulated bug" in r for r in rep["reasons"]))
         self.assertTrue(any("RuntimeError" in l for l in self.logs))
 
+    def test_b08_one_dead_book_stream_forces_a_reconnect(self):
+        # The connection keeps delivering 5 of 6 streams, so the connection-level stale check never fires and the
+        # dead stream stayed dead until someone read a WARN line in the journal.
+        self.mock.reset(mute={"btcusdt@bookTicker"}, mute_after=12)
+        self._record(self._specs()[:1], lambda: self._conn("binance-0")["sessions"] >= 2, stream_stale_s=0.5)
+        rep = md.verify_conn(os.path.join(self.out, "binance-0"))
+        self.assertGreaterEqual(rep["sessions"], 2)
+        self.assertTrue(any("btcusdt@bookticker" in r and "silent" in r for r in rep["reasons"]), rep["reasons"])
+
+    def test_b08_a_quiet_trade_stream_is_not_a_dead_stream(self):
+        self.mock.reset(mute={"btcusdt@trade"}, mute_after=0)
+        t0 = time.monotonic()
+        self._record(self._specs()[:1], lambda: time.monotonic() - t0 > 2.0, stream_stale_s=0.4)
+        self.assertEqual(md.verify_conn(os.path.join(self.out, "binance-0"))["sessions"], 1)
+
+    def test_b09_a_dead_connection_thread_ends_the_process_with_an_error(self):
+        # A thread that ends (here: SystemExit, which no handler catches) left the process running with one venue
+        # missing; systemd only restarts a process that exits.
+        self.mock.reset()
+
+        def die(self_):
+            raise SystemExit("thread gone")
+        real = md.ConnRecorder._session
+        md.ConnRecorder._session = die
+        self.addCleanup(setattr, md.ConnRecorder, "_session", real)
+        code = self._record(self._specs()[:1], lambda: False, timeout=4.0)
+        self.assertEqual(code, md.EXIT_THREAD_DIED)
+        self.assertTrue(any("thread" in l and "ended" in l for l in self.logs))
+
     def test_disk_guard_stops_cleanly_with_exit_code(self):
         self.mock.reset()
         free = {"n": 10**12}
@@ -575,6 +608,23 @@ class PollingWsUnitTests(unittest.TestCase):
         with self.assertRaises(lp.WsError):
             for _ in range(5):
                 ws.poll(0.1)
+
+    def test_b08_stream_watchdog_backs_off_and_recovers(self):
+        rec = md.ConnRecorder(md.ConnSpec("binance-0", "binance", "x", 0, "/", ["a@bookticker", "a@trade"]), None, None,
+                              threading.Event(), stream_stale_s=10.0)
+        rec._arm_streams(100.0)
+        self.assertEqual(list(rec._seen), ["a@bookticker"])            # trades are exempt
+        rec._check_streams(109.0)                                      # within the limit
+        with self.assertRaises(md._Stale):
+            rec._check_streams(111.0)
+        rec._arm_streams(200.0)                                        # reconnected: the limit is now 20 s
+        rec._check_streams(215.0)
+        with self.assertRaises(md._Stale):
+            rec._check_streams(221.0)
+        rec._arm_streams(300.0)                                        # limit 40 s; the stream comes back
+        rec._seen["a@bookticker"] = 305.0
+        rec._check_streams(306.0)
+        self.assertEqual(rec._stale_mult, 1)                           # healthy again: back to the base limit
 
     def test_c12_slow_writing_does_not_move_the_stamps(self):
         # The stamp is the read time. Writing a batch slowly must not spread its messages over the writing time.

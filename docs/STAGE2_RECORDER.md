@@ -26,6 +26,11 @@ bash tools/install_md_recorder_service.sh                 # pasang sebagai servi
   jadi setelah berhari-hari bisa makan waktu lama; jangan di-Ctrl+C, biarkan selesai.
 - Berhenti: `sudo systemctl stop md-recorder`. Data tetap di `~/md`.
 
+**Pemulihan otomatis (audit B-08, B-09):** bila satu stream order book diam 10 menit sementara koneksinya hidup
+(subscription putus sepihak), koneksi itu disambung ulang dan semua stream di-subscribe lagi; batasnya menggandakan diri
+(sampai 160 menit) bila stream memang sepi, dan kembali ke 10 menit begitu semua stream segar. Stream trade dikecualikan.
+Bila thread sebuah koneksi berakhir sendiri, proses keluar dengan kode 1 sehingga systemd menyalakan ulang semuanya.
+
 ### Status line (setiap 60 detik)
 
 ```

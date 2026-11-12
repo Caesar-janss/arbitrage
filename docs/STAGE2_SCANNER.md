@@ -44,9 +44,19 @@ terbesar **saat ini** (sekadar indikator; laporan yang menentukan).
     di baris `now:` status line (run pertama md-tokyo: RON di Bitget ~1.640× harga MEXC/OKX tampil sebagai
     "+16.410.477 bps" sebelum fix ini);
   - ≥ 3 snapshot tanpa perubahan harga/ukuran di kedua sisi: book beku;
-  - bertahan > `--suspect-minutes` (default 10): biasanya deposit/withdraw ditutup, sehingga saldo tidak bisa
-    diseimbangkan (inilah jebakan "selisih besar");
+  - terbuka > `--suspect-minutes` (default 10), **sekali jalan atau total dalam satu jam UTC** untuk (koin, venue beli,
+    venue jual) yang sama: biasanya deposit/withdraw ditutup, sehingga saldo tidak bisa diseimbangkan (inilah jebakan
+    "selisih besar"). Aturan "total dalam satu jam" penting (audit B-06): episode berakhir setiap kali satu venue gagal
+    di-fetch atau selisih turun sesaat, sehingga selisih yang menetap seharian sebelumnya terhitung sebagai ratusan
+    episode pendek yang "bisa diambil" (tes: selisih 6 % selama 25 menit → 50 episode ok, $35.769/hari semu);
   - venue tanpa ukuran top-of-book.
+- Kolom laporan tambahan (audit B-10): **Arah dominan** per pasangan (mendekati 100 % = peluang searah, stok habis
+  tanpa transfer, $/hari tidak bisa diulang) dan **kutipan koin besar berubah antar snapshot** per venue (jauh di bawah
+  100 % = ticker REST venue itu cache lambat, selisihnya bisa semu). $/hari **menghitung ganda** likuiditas yang sama
+  bila satu venue menyimpang terhadap beberapa venue: bandingkan antar pasangan, jangan dijumlahkan.
+- Laporan membatasi memorinya sendiri (`--max-mem-gb`, default 3) dan berjalan dengan prioritas terendah, supaya tidak
+  pernah mendorong recorder di VM yang sama ke OOM killer (audit B-07). Kalau batas tercapai: exit 4, perkecil
+  `--last-hours`.
 - **$/hari** = jumlah per episode dari profit bersih bila diambil **sekali** di snapshot terbaiknya, sebesar top-of-book.
   Ini sinyal peringkat, bukan ramalan: pemain lain bisa lebih dulu (terlalu optimis), level book berikutnya tidak
   dihitung (terlalu pesimis), dan fee memakai asumsi tier dasar.
@@ -75,7 +85,8 @@ weight 4/ronde dari 6.000/menit; venue lain dicek saat probe/run).
 
 ## 4. Bukti
 
-`python3 -m unittest discover -s tools/tests -v`: 21 tes scanner (parser 8 venue dari fixture, logika episode persis
+`python3 -m unittest discover -s tools/tests -v`: 28 tes scanner (21 semula + 2 filter identitas + 5 audit B-06/B-07/B-10;
+mutan audit 7/7 tertangkap, lihat `docs/review/stage2/REGRESSION_LOG.md`). Semula: 21 tes scanner (parser 8 venue dari fixture, logika episode persis
 terhadap ronde sintetis, filter identitas/beku/lama/tanpa ukuran, venue gagal tidak dijembatani, end-to-end terhadap mock
 HTTPS 8 venue dengan satu venue mati, venue lambat tidak ditanya dobel, disk guard, CLI). Mutation 7/7 tertangkap: fee
 tidak dikurangkan, tanpa syarat ≥ 2 snapshot, tanpa filter identitas, menjembatani venue yang gagal, tanpa deteksi book

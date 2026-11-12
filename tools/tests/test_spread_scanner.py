@@ -202,6 +202,66 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(sc.classify_episode(ep, 5.0, 2, 10), "long")
         self.assertIn("(tidak ada episode yang lolos)", sc.report(a))
 
+    def test_b06_a_persistent_gap_broken_up_by_fetch_failures_is_not_many_ok_episodes(self):
+        # 25 minutes of a steady ~6 % gap (deposits closed), with venue b failing every 6th round. Episodes never
+        # bridge a failed round, so each lasted 25 s and all of them counted as tradable.
+        rounds = []
+        for i in range(300):
+            if i % 6 == 5:
+                rounds.append({"a": snap({"X": [99.9, 5, 100.0, 5]}), "b": {"t0": 0, "t1": 0, "err": "HTTP 503"}})
+            else:
+                bid = 106.0 + (i % 7) * 0.01
+                rounds.append({"a": snap({"X": [99.9, 5, 100.0, 5]}), "b": snap({"X": [bid, 2, bid + .1, 2]})})
+        a = sc.analyse(write_rounds(self.dir, rounds), {"a": 10, "b": 10})
+        kinds = sc.episode_kinds(a)
+        self.assertEqual(len(kinds["ok"]), 0)
+        self.assertEqual(len(kinds["long"]), 50)
+        self.assertIn("(tidak ada episode yang lolos)", sc.report(a))
+
+    def test_b06_short_gaps_that_recur_a_few_times_stay_tradable(self):
+        flat = {"a": snap({"X": [99.9, 5, 100.0, 5]}), "b": snap({"X": [99.95, 2, 100.05, 2]})}
+        rounds = []
+        for burst in range(3):
+            rounds += [{"a": snap({"X": [99.9, 5, 100.0, 5]}), "b": snap({"X": [100.3 + k * .01, 2, 100.5, 2]})} for k in range(4)]
+            rounds += [flat] * 40
+        a = sc.analyse(write_rounds(self.dir, rounds), {"a": 10, "b": 10})
+        self.assertEqual(len(sc.episode_kinds(a)["ok"]), 3)
+
+    def test_b07_a_very_long_episode_keeps_bounded_state(self):
+        rounds = [{"a": snap({"X": [99.9, 5, 100.0, 5]}), "b": snap({"X": [100.3 + (i % 50) * .01, 2, 101.0, 2]})}
+                  for i in range(3000)]
+        a = sc.analyse(write_rounds(self.dir, rounds), {"a": 10, "b": 10})
+        (ep,) = a["episodes"]
+        self.assertEqual(ep.rounds, 3000)
+        self.assertEqual((ep.nets, ep.sizes, ep.legs), ([], [], set()))        # samples freed once the episode ended
+        self.assertEqual(ep.legs_n, 2)                                         # "more than one distinct quote" is kept
+        self.assertAlmostEqual(ep.net_med, 34.0, places=4)                     # median of the first EP_SAMPLES snapshots
+        self.assertAlmostEqual(ep.net_max, (100.79 / 100.0 - 1) * 1e4 - 20, places=6)   # the maximum is still exact
+        self.assertAlmostEqual(ep.best_usd, ep.net_max / 1e4 * min(500, 100.79 * 2), places=6)
+
+    def test_b10_report_shows_direction_balance_and_quote_freshness(self):
+        up = lambda k: {"a": snap({"X": [99.9, 5, 100.0, 5], "BTC": [60000 + k, 1, 60001 + k, 1]}),      # noqa: E731
+                        "b": snap({"X": [100.3 + k * .01, 2, 100.5, 2], "BTC": [60000, 1, 60001, 1]})}
+        flat = {"a": snap({"X": [99.9, 5, 100.0, 5], "BTC": [60050, 1, 60051, 1]}),
+                "b": snap({"X": [99.95, 2, 100.05, 2], "BTC": [60000, 1, 60001, 1]})}
+        a = sc.analyse(write_rounds(self.dir, [up(0), up(1), up(2), flat, up(3), up(4), flat]), {"a": 10, "b": 10})
+        self.assertEqual(a["fresh"]["a"], [6, 6])                 # venue a's BTC quote changed in all 6 follow-up rounds
+        self.assertEqual(a["fresh"]["b"], [0, 6])                 # venue b serves the same BTC quote every time
+        text = sc.report(a)
+        self.assertIn("| a | 7 | 0 |", text)
+        self.assertRegex(text, r"\| b \| 7 \| 0 \| \d+ \| 10 \| 0 % \|")          # frozen reference quote is visible
+        self.assertRegex(text, r"\| a ↔ b \|.*\| 100 % a→b \|")                    # every dollar in one direction
+
+    def test_b10_direction_share_names_the_side_that_dominates(self):
+        ab = lambda k: {"a": snap({"X": [99.9, 5, 100.0, 5]}), "b": snap({"X": [100.3 + k * .01, 2, 100.5, 2]})}   # noqa: E731
+        ba = lambda k: {"b": snap({"X": [99.9, 5, 100.0, 5]}), "a": snap({"X": [100.3 + k * .01, 5, 100.5, 5]})}   # noqa: E731
+        flat = {"a": snap({"X": [99.9, 5, 100.0, 5]}), "b": snap({"X": [99.95, 2, 100.05, 2]})}
+        a = sc.analyse(write_rounds(self.dir, [ab(0), ab(1), flat, ba(0), ba(1), flat]), {"a": 10, "b": 10})
+        usd = {f"{e.buy}→{e.sell}": e.best_usd for e in a["episodes"]}
+        share = round(100 * usd["b→a"] / sum(usd.values()))
+        self.assertGreater(share, 60)                              # b→a has 2.5x the top-of-book size
+        self.assertIn(f"| {share} % b→a |", sc.report(a))
+
     def test_top_of_book_below_min_usd_is_ignored_and_unknown_size_is_separate(self):
         tiny = {"a": snap({"X": [99.9, 0.1, 100.0, 0.1]}), "b": snap({"X": [100.3, 0.1, 100.4, 0.1]})}  # $10
         self.assertEqual(sc.analyse(write_rounds(self.dir, [tiny, tiny]), {"a": 10, "b": 10})["episodes"], [])
