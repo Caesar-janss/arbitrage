@@ -67,6 +67,7 @@ DEFAULT_SYMBOLS = [
 BINANCE_STREAMS = ("bookTicker", "depth20@100ms", "trade")
 BITGET_CHANNELS = ("books1", "books15", "trade")
 EXIT_DISK_FULL = 3
+EXIT_THREAD_DIED = 1            # a connection thread ended on its own: exit so systemd restarts the whole recorder (B-09)
 MAX_FRAME = 64 << 20
 
 
@@ -374,11 +375,16 @@ class HourlyWriter:
 class ConnRecorder(threading.Thread):
     def __init__(self, spec: ConnSpec, writer: HourlyWriter, ctx: ssl.SSLContext, stop: threading.Event,
                  stale_s: float = 30.0, timeout: float = 10.0, backoff: tuple[float, float] = (1.0, 60.0),
-                 poll_s: float = 0.5, log: Callable[[str], None] = print, stats_s: float = 60.0):
+                 poll_s: float = 0.5, log: Callable[[str], None] = print, stats_s: float = 60.0,
+                 stream_stale_s: float = 600.0):
         super().__init__(name=spec.name, daemon=True)
         self.spec, self.writer, self.ctx, self.stop = spec, writer, ctx, stop
         self.stale_s, self.timeout, self.backoff, self.poll_s, self.log = stale_s, timeout, backoff, poll_s, log
         self.stats_s = stats_s
+        self.stream_stale_s = stream_stale_s  # one BOOK stream silent this long while the connection lives -> reconnect
+        self._stale_mult = 1                  # doubles after each such reconnect (a stream may be legitimately quiet)
+        self._seen: dict = {}                 # book stream -> monotonic time of its last message
+        self._seen_batch: set = set()
         self._st_reads: list[int] = []       # messages per socket read
         self._st_lag: list[int] = []         # µs from a poll's first read stamp to the end of writing that poll's batch
         self._st_t0 = time.monotonic()
@@ -434,12 +440,20 @@ class ConnRecorder(threading.Thread):
                 if i:
                     self._pump(ws, 0.15)                    # keep reading (and stamping) while pacing requests
                 ws.send_text(sub)
-            last_data = last_ka = time.monotonic()
+            last_data = last_ka = last_chk = time.monotonic()
+            self._arm_streams(last_data)
             while not self.stop.is_set():
                 batch = ws.poll_stamped(self.poll_s)
                 now = time.monotonic()
                 if batch and self._deliver(batch):
                     last_data = now
+                    for k in self._seen_batch:
+                        if k in self._seen:
+                            self._seen[k] = now
+                    self._seen_batch.clear()
+                if now - last_chk >= min(1.0, self.stream_stale_s / 4):
+                    last_chk = now
+                    self._check_streams(now)
                 if self.spec.keepalive and now - last_ka >= self.spec.keepalive_s:
                     ws.send_text(self.spec.keepalive)
                     last_ka = now
@@ -447,6 +461,29 @@ class ConnRecorder(threading.Thread):
                     raise _Stale(f"no market data for {self.stale_s:.0f} s")
         finally:
             ws.close()
+
+    def _arm_streams(self, now: float) -> None:
+        """Start of a session: every book stream gets a full limit to deliver its first message. Trades are exempt."""
+        self._seen = {k: now for k in self.spec.streams if not (k.endswith("trade") or k.startswith("trade:"))}
+        self._seen_batch.clear()
+
+    def _check_streams(self, now: float) -> None:
+        """
+        B-08: the connection-level stale check only fires when NOTHING arrives. One stream that stops (a dropped
+        subscription, a venue-side fault) while the others flow would stay dead for good. Reconnecting re-subscribes
+        everything. A stream that is merely quiet costs a 1-2 s reconnect per limit, and the limit doubles each time
+        (up to 16x) until every book stream is fresh again.
+        """
+        if not self._seen:
+            return
+        limit = self.stream_stale_s * self._stale_mult
+        dead = sorted(k for k, t in self._seen.items() if now - t > limit)
+        if dead:
+            self._stale_mult = min(self._stale_mult * 2, 16)
+            more = f" (+{len(dead) - 1} more)" if len(dead) > 1 else ""
+            raise _Stale(f"stream {dead[0]}{more} silent for {limit:.0f} s while the connection is alive")
+        if self._stale_mult > 1 and all(now - t <= self.stream_stale_s for t in self._seen.values()):
+            self._stale_mult = 1
 
     def _pump(self, ws: PollingWs, seconds: float) -> None:
         end = time.monotonic() + seconds
@@ -494,6 +531,7 @@ class ConnRecorder(threading.Thread):
         self.msgs += 1
         if kind == "data":
             self.counts[key] += 1
+            self._seen_batch.add(key)
             return True
         if kind == "error":
             self.errors.append(text[:300])
@@ -588,12 +626,13 @@ def clock_status() -> dict:
 def record(specs: list[ConnSpec], out: str, ctx: ssl.SSLContext, stop: threading.Event, hours: Optional[float] = None,
            status_s: float = 60.0, min_free_gb: float = 5.0, stale_s: float = 30.0, poll_s: float = 0.5,
            free_bytes: Callable[[str], int] = lambda p: shutil.disk_usage(p).free,
-           log: Callable[[str], None] = print, flush_s: float = 5.0, stats_s: float = 60.0) -> int:
+           log: Callable[[str], None] = print, flush_s: float = 5.0, stats_s: float = 60.0,
+           stream_stale_s: float = 600.0) -> int:
     os.makedirs(out, exist_ok=True)
     clock = {"v": clock_status(), "t": time.monotonic()}
     header = lambda: {"host": socket.gethostname(), **clock["v"]}  # noqa: E731
     recs = [ConnRecorder(s, HourlyWriter(out, s.name, flush_s=flush_s, header=header), ctx, stop, stale_s=stale_s,
-                         poll_s=poll_s, log=log, stats_s=stats_s) for s in specs]
+                         poll_s=poll_s, log=log, stats_s=stats_s, stream_stale_s=stream_stale_s) for s in specs]
     for r in recs:
         r.start()
     end = time.monotonic() + hours * 3600 if hours else None
@@ -604,6 +643,8 @@ def record(specs: list[ConnSpec], out: str, ctx: ssl.SSLContext, stop: threading
     try:
         while not stop.is_set():
             stop.wait(min(1.0, status_s))
+            if stop.is_set():                               # normal shutdown: threads may already be gone, that is fine
+                break
             now = time.monotonic()
             if end and now >= end:
                 log("recording time reached")
@@ -611,6 +652,11 @@ def record(specs: list[ConnSpec], out: str, ctx: ssl.SSLContext, stop: threading
             if free_bytes(out) < min_free_gb * 1e9:
                 log(f"STOP: less than {min_free_gb} GB free on the data disk")
                 code = EXIT_DISK_FULL
+                break
+            gone = [r.spec.name for r in recs if not r.is_alive()]
+            if gone:                                        # B-09: never keep running with a venue silently missing
+                log(f"STOP: connection thread {', '.join(gone)} ended on its own; exiting so the service restarts")
+                code = EXIT_THREAD_DIED
                 break
             for r in recs:
                 r.writer.flush_if_due()
