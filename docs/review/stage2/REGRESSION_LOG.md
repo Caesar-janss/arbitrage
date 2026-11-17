@@ -54,3 +54,20 @@ Tes ditulis dulu dan dijalankan terhadap basis: 1 error (modul belum ada). Setel
 | basis terbalik | tertangkap |
 
 Hasil akhir 10/10, dijalankan ulang tanpa cache bytecode (temuan B-12: putaran pertama sempat memakai `.pyc` mutan).
+
+## Langkah 2b — keterlambatan feed di `pair_analysis.py` (basis `3c13b1c`)
+
+Tes ditulis dulu: 9 merah terhadap basis (8 error: API belum ada, 1 gagal). Setelah implementasi 30 hijau; satu mutan lolos
+→ tes ke-31. Suite penuh 109 tes. Mutasi dijalankan dengan `python3 -B` (B-12).
+
+| Mutan | Hasil |
+|---|---|
+| dasar lag tidak bergulir (perubahan jam = feed telat selamanya) | tertangkap |
+| sampel lama dianggap terkini | tertangkap |
+| lag mentah tanpa dasar | tertangkap |
+| ambang diabaikan | tertangkap |
+| tanpa sampel dianggap normal | tertangkap |
+| trade Binance tidak disampel / `ts` Bitget tidak disampel | 2/2 tertangkap |
+| capture "feed normal" menghitung semua episode | tertangkap |
+| tanpa batas kewajaran stempel | lolos → `test_an_implausible_venue_timestamp_is_not_a_lag_sample` → tertangkap |
+| status feed dipakai ulang dari episode lain | tertangkap |
