@@ -1,0 +1,50 @@
+# Tahap 2 langkah 4 — analisis funding Binance USDⓈ-M ↔ Bitget USDT-M (`tools/funding_analysis.py`)
+
+Pertanyaan: **kalau kita short di venue yang funding-nya lebih tinggi dan long di venue lain dengan notional yang sama,
+berapa funding bersih yang terkumpul setelah fee, tanpa melihat masa depan?** Ini bukan perlombaan latensi; yang
+menentukan adalah besar dan kestabilan selisih funding, fee buka/tutup, dan basis antar venue.
+
+## 1. Menjalankan (di md-tokyo)
+
+```
+cd ~/arbitrage && git pull
+nice -n 19 python3 tools/funding_analysis.py --data ~/md_perp > ~/funding_report.txt
+```
+
+Opsi: `--last-hours N`, `--symbols BTCUSDT,ETHUSDT`, `--roundtrip-bps 22` (fee buka + tutup di kedua venue, bps dari
+notional satu leg; default = taker 5 + 6 bps × 2, tier dasar, **belum diverifikasi**), `--hysteresis-bps 0.5`.
+Kecepatan: ≈ 650 ribu baris/s di container builder (1,05 juta baris sintetis 1,6 s); 1 hari rekaman perp ≈ 70 juta
+baris ≈ 4–8 menit di VM. Hasil bermakna butuh beberapa settlement: interval 8 jam = 3 per hari.
+
+## 2. Sumber data (format dari rekaman md-tokyo 2026-11-17)
+
+- Binance `<sym>@markPrice@1s` (`markPriceUpdate`): `r` = funding rate periode berjalan, `T` = waktu funding periode itu,
+  `p` = mark price.
+- Bitget `ticker` USDT-FUTURES: `fundingRate`, `nextFundingTime`, `markPrice`.
+
+## 3. Definisi
+
+- **Settlement**: saat waktu funding venue/simbol berpindah ke waktu yang lebih akhir *setelah* waktu itu lewat, rate
+  terakhir yang teramati sebelum perpindahan (paling lama 10 menit sebelum waktu funding) = rate yang di-settle. Pindah
+  sebelum waktunya (jadwal diubah venue) bukan settlement. Panjang periode = jarak ke settlement sebelumnya.
+- **Akrual per jam**: rate settle / panjang periode, sehingga venue dengan interval berbeda (mis. 8 jam vs 4 jam)
+  dibandingkan per jam.
+- **Hold**: sisi ditentukan dari prediksi rate (observasi terakhir pada atau sebelum awal jam, paling tua 1 jam) di
+  jam pertama, dipegang sampai akhir; biaya satu round trip.
+- **Flip**: sama, tetapi pindah sisi bila prediksi di awal jam menunjuk sisi lain lebih dari `--hysteresis-bps` per
+  8 jam; tiap pindah = satu round trip lagi.
+- **Sisi tetap terbaik (hindsight)**: |jumlah selisih| − satu round trip. Batas atas, bukan strategi.
+- **Basis mark**: Binance vs Bitget, sampel per menit. Perubahannya antara buka dan tutup ikut menjadi untung/rugi dan
+  tidak termasuk di "net".
+
+## 4. Batas yang diketahui
+
+- Fee asumsi; fee maker bisa jauh lebih rendah tetapi berisiko tidak terisi.
+- Interval funding per simbol diambil dari settlement yang teramati (properti jadwal venue, bukan informasi pasar).
+- Belum menghitung slippage saat buka/tutup, kebutuhan margin, atau risiko likuidasi pada leg yang merugi.
+- Hold "per tahun" diskalakan dari jam yang terukur: dengan beberapa hari data, angka ini sangat kasar.
+
+## 5. Tes
+
+`tools/tests/test_funding_analysis.py` (15 tes; pesan nyata dari md-tokyo untuk parser). Mutation 12/12 tertangkap
+(`docs/review/stage2/REGRESSION_LOG.md`).

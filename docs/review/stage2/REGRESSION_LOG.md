@@ -93,3 +93,20 @@ sesuai perubahan Binance 2026-04-23, sehingga salah routing = stream bisu = tes 
 | `E` bookTicker perp / `aggTrade` tidak disampel di analisis | 2/2 |
 
 11/11, dengan `python3 -B`. Suite penuh: 120 tes hijau.
+
+## Langkah 4 — `tools/funding_analysis.py` (basis `547cd59`)
+
+Tes ditulis dulu (modul belum ada: merah). Parser diuji dengan pesan nyata dari md-tokyo. Setelah implementasi 14/14
+hijau pada percobaan pertama; tiga tes lalu diperketat sebelum mutasi karena masing-masing punya mutan yang akan lolos:
+settlement (rate sebelum dan sesudah 08:00 sama), perubahan jadwal (tidak ada observasi dalam 10 menit sebelum waktu
+funding), dan kesegaran prediksi saat masuk (tes baru). Hasil 15 tes.
+
+| Mutan | Hasil |
+|---|---|
+| rate settle = rate setelah pergantian / tanpa syarat 10 menit / perubahan jadwal dihitung settlement | 3/3 |
+| sisi hold terbalik / hold tanpa fee / switch tanpa biaya / histeresis diabaikan | 4/4 |
+| prediksi melihat 1 jam ke depan / prediksi basi diterima | 2/2 |
+| interval tidak dinormalisasi (akrual / prediksi) | 2/2 |
+| basis terbalik | 1/1 |
+
+12/12, `python3 -B`.
