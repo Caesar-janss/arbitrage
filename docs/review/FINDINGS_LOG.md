@@ -122,6 +122,8 @@ ditegakkan di `TradeGroup`, bukan panggilan host opsional.
 | B-08 | S3 | `md_recorder.ConnRecorder` | satu stream book mati sementara koneksi hidup tidak pernah pulih (hanya baris WARN di journal) | CONFIRMED | mock: 1 dari 6 stream bisu, 1 sesi selamanya | watchdog per stream → reconnect, backoff 2× sampai 16× |
 | B-09 | S3 | `md_recorder.record` | thread koneksi yang berakhir tidak terdeteksi; proses tetap jalan tanpa satu venue | CONFIRMED | thread mati (SystemExit) → exit code 0 setelah timeout | exit 1 → systemd restart |
 | B-10 | S3 | `spread_scanner` laporan | tidak ada arah dominan per pasangan (peluang searah tidak bisa diulang) dan tidak ada indikator ticker REST basi | CONFIRMED | — | dua kolom baru + catatan hitung ganda |
+| B-11 | S3 | `spread_scanner` laporan | filter "book beku" hanya membuang episode bila KEDUA sisi tidak berubah; satu kutipan basi melawan kutipan hidup lolos sebagai peluang | OPEN (belum di-fix; dugaan untuk INIT ternyata salah, kutipannya hidup) | — | rencana: filter per leg + status transfer per koin |
+| B-12 | S4 | tooling mutation check | mutan dengan ukuran byte sama yang dipulihkan dalam detik yang sama memakai `.pyc` basi: tes bisa berjalan terhadap kode yang salah | CONFIRMED | `test_basis_is_the_median_mid_difference` gagal pada kode benar | mutasi dijalankan dengan `python3 -B`, `PYTHONDONTWRITEBYTECODE=1`, cache dihapus dulu |
 
 Temuan non-kode dari audit yang sama (strategi, operasi): `docs/AUDIT_2026-11-12.md`.
 

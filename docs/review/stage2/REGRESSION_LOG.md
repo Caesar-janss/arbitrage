@@ -34,3 +34,23 @@ B-07 (1 episode 3.000 ronde menyimpan 3.000 + 3.000 sampel dan 50 leg).
 | B-10 S3 | `test_b10_report_shows_direction_balance_and_quote_freshness`, `test_b10_direction_share_names_the_side_that_dominates` | 2/2 (mutan "arah mengabaikan sisi" sempat lolos → tes dua arah ditambah) |
 
 Sesudah fix: 78 tes hijau (28 scanner, 40 recorder, 10 probe), stress 30/30 (10 suite paralel).
+
+## Langkah 2 — `tools/pair_analysis.py` (basis `efa109e`)
+
+Tes ditulis dulu dan dijalankan terhadap basis: 1 error (modul belum ada). Setelah implementasi: 19 → 21 tes hijau
+(dua tes ditambah karena mutan lolos, lihat di bawah). Suite penuh: 99 tes (21 analisis, 28 scanner, 40 recorder, 10 probe).
+
+| Mutan | Hasil |
+|---|---|
+| capture memakai keadaan saat buka, bukan saat tiba | lolos pada putaran 1 (keadaan hanya berubah sekali) → `test_capture_uses_the_state_at_arrival_not_at_open` diberi perubahan kedua → tertangkap |
+| capture dihitung juga bila L = durasi | tertangkap (`test_gap_closing_exactly_on_arrival_is_missed`) |
+| kutipan tidak dilupakan saat putus | tertangkap |
+| fee hanya satu leg | tertangkap |
+| ukuran = leg terbesar | tertangkap |
+| arah tertukar | tertangkap |
+| label penutup `gap` hilang | tertangkap (cabang "gross None" yang lolos ternyata kode mati, dihapus) |
+| tanpa penggabungan waktu antar-koneksi | tertangkap |
+| potongan `--last-hours` di dalam file mati | lolos pada putaran 1 → `test_last_hours_cut_also_inside_a_file` → tertangkap |
+| basis terbalik | tertangkap |
+
+Hasil akhir 10/10, dijalankan ulang tanpa cache bytecode (temuan B-12: putaran pertama sempat memakai `.pyc` mutan).
