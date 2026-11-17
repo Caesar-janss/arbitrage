@@ -71,3 +71,25 @@ Tes ditulis dulu: 9 merah terhadap basis (8 error: API belum ada, 1 gagal). Sete
 | capture "feed normal" menghitung semua episode | tertangkap |
 | tanpa batas kewajaran stempel | lolos → `test_an_implausible_venue_timestamp_is_not_a_lag_sample` → tertangkap |
 | status feed dipakai ulang dari episode lain | tertangkap |
+
+## Langkah 3 — `md_recorder.py --market perp` (basis `c06b31f`)
+
+Tes ditulis dulu: 7 merah di recorder (6 error: API belum ada; 1 gagal), 2 merah di analisis. Satu tes CLI sempat lolos
+karena alasan yang salah (argparse menolak `--market` sebagai argumen tak dikenal) → diperketat agar menuntut "invalid
+choice". Tes `books1` USDT-FUTURES hijau sejak awal (parser sudah kompatibel); dipertahankan sebagai pengaman. Tes CLI
+"pakai preflight perp dan host perp" ditambah setelah implementasi untuk menutup mutan dispatch.
+
+Mock Binance kini hanya melayani stream di path yang benar (`/public`: bookTicker/depth; `/market`: aggTrade/markPrice),
+sesuai perubahan Binance 2026-04-23, sehingga salah routing = stream bisu = tes merah.
+
+| Mutan | Hasil |
+|---|---|
+| stream market di `/public` | tertangkap |
+| `contractType` diabaikan / status Bitget diabaikan / baris Binance hilang tetap disimpan | 3/3 |
+| daftar futures kosong dianggap otoritatif | tertangkap |
+| Bitget perp dikirim sebagai SPOT / tanpa channel `ticker` (funding) | 2/2 |
+| nama stream di-lowercase di URL (`markPrice` case sensitive) | tertangkap |
+| CLI memakai preflight spot | tertangkap |
+| `E` bookTicker perp / `aggTrade` tidak disampel di analisis | 2/2 |
+
+11/11, dengan `python3 -B`. Suite penuh: 120 tes hijau.

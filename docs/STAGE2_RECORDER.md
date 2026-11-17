@@ -170,3 +170,31 @@ Bitget terpisah (sudah tertutup deteksi stale 30 s); pemisahan reader/writer (me
 ```bash
 cd ~/arbitrage && git pull && sudo systemctl restart md-recorder && sleep 70 && journalctl -u md-recorder -n 5 --no-pager
 ```
+
+## 8. Mode perp (`--market perp`, PR #15)
+
+Alasan: analisis 5,8 hari spot (`docs/STAGE2_PAIR_ANALYSIS.md` §3b) menunjukkan fee lebih menentukan daripada kecepatan;
+fee perp jauh di bawah spot. Rekaman perp memakai format dan alat yang sama (`--verify`, `pair_analysis.py`).
+
+| Venue | Koneksi | Stream / channel | Status |
+|---|---|---|---|
+| Binance USDⓈ-M | `wss://fstream.binance.com/public/stream?streams=…` (`binance-N`) | `<sym>@bookTicker`, `<sym>@depth20@100ms` | URL dan pembagian path: **VERIFIED** di dokumen (Binance, "Important WebSocket Change Notice": path lama `/stream` pensiun 2026-04-23). Perilaku di VM: UNVERIFIED sampai run pertama |
+| Binance USDⓈ-M | `wss://fstream.binance.com/market/stream?streams=…` (`binance-mN`) | `<sym>@aggTrade`, `<sym>@markPrice@1s` (funding `r`, waktu funding berikut `T`) | sama |
+| Bitget USDT-M | `wss://ws.bitget.com/v2/ws/public`, `instType` `USDT-FUTURES` | `books1`, `books15`, `trade`, `ticker` (funding `fundingRate`, `nextFundingTime`) | `books1`/`books15` USDT-FUTURES: **VERIFIED** di dokumen Bitget. Field funding di `ticker`: UNVERIFIED (pesan disimpan mentah, jadi nama field hanya penting saat analisis) |
+| Preflight | Binance `GET fapi.binance.com/fapi/v1/exchangeInfo` (satu daftar penuh: `status`, `contractType`); Bitget `GET /api/v2/mix/market/contracts?productType=USDT-FUTURES&symbol=X` (`symbolStatus`) | aturan C-13: hanya jawaban otoritatif yang membuang simbol | UNVERIFIED sampai run pertama |
+
+Simbol Binance perp bisa berbeda nama (mis. PEPE diperdagangkan sebagai `1000PEPEUSDT`): preflight membuang simbol yang
+tidak ada di kedua venue dengan nama yang sama, dan log-nya menyebut alasannya.
+
+Instalasi di md-tokyo (recorder spot dihentikan dulu; datanya tetap di `~/md`):
+
+```
+cd ~/arbitrage && git pull
+sudo systemctl disable --now md-recorder
+bash tools/install_md_recorder_service.sh $HOME/md_perp perp
+journalctl -u md-recorder-perp -n 30 --no-pager        # cek preflight dan koneksi
+python3 tools/md_recorder.py --verify ~/md_perp --last-hours 1
+```
+
+Tes: 9 tes baru di `test_md_recorder.py` (spec per path, end-to-end ke mock yang hanya melayani stream di path yang benar,
+preflight perp otoritatif / tidak, CLI), 3 di `test_pair_analysis.py`. Mutation 11/11.
