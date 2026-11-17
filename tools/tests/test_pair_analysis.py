@@ -33,9 +33,20 @@ def bn(sym: str, bid: float, bid_q: float, ask: float, ask_q: float) -> str:
             % (sym.lower(), sym, bid, bid_q, ask, ask_q))
 
 
-def bg(sym: str, bid: float, bid_q: float, ask: float, ask_q: float) -> str:
+def bg(sym: str, bid: float, bid_q: float, ask: float, ask_q: float, ts: int = 1) -> str:
     return ('{"action":"snapshot","arg":{"instType":"SPOT","channel":"books1","instId":"%s"},"data":[{"asks":[["%s","%s"]],'
-            '"bids":[["%s","%s"]],"checksum":0,"seq":1,"ts":"1"}],"ts":1}' % (sym, ask, ask_q, bid, bid_q))
+            '"bids":[["%s","%s"]],"checksum":0,"seq":1,"ts":"%d"}],"ts":1}' % (sym, ask, ask_q, bid, bid_q, ts))
+
+
+def bnt(sym: str, event_ms: int) -> str:
+    """Binance trade message: E = venue event time (ms)."""
+    return ('{"stream":"%s@trade","data":{"e":"trade","E":%d,"s":"%s","t":1,"p":"100","q":"1","T":%d,"m":true,"M":true}}'
+            % (sym.lower(), event_ms, sym, event_ms))
+
+
+def server_ms(ms: float, lag_ms: float, base_ns: int = None) -> int:
+    """Venue timestamp of a message we receive at `ms` (test clock) after a feed lag of `lag_ms`."""
+    return int(((BASE_NS if base_ns is None else base_ns) // 1_000_000) + ms - lag_ms)
 
 
 def meta(ev: str) -> str:
@@ -61,7 +72,7 @@ class Rec:
         for (conn, hour), rows in self.lines.items():
             os.makedirs(os.path.join(self.root, conn), exist_ok=True)
             path = os.path.join(self.root, conn, f"{hour}_00.tsv.gz")
-            data = "".join(f"{ns}\t{p}\n" for ns, p in rows).encode()
+            data = "".join(f"{ns}\t{p}\n" for ns, p in sorted(rows, key=lambda r: r[0])).encode()
             if truncate:                                     # a file still being written: sync-flushed, no trailer
                 co = zlib.compressobj(6, zlib.DEFLATED, 31)
                 raw = co.compress(data) + co.flush(zlib.Z_SYNC_FLUSH)
@@ -222,6 +233,84 @@ class PairAnalysisTest(unittest.TestCase):
         self.rec.add("binance-0", 3700, bn("BTCUSDT", 100.09, 10, 100.11, 10))
         b = run(self.rec)["basis"]["BTCUSDT"]
         self.assertAlmostEqual(pa.median(b), (100.10 / 99.99 - 1) * 1e4, places=6)
+
+    # ── feed lag: is the quote we see already old at the venue? ────────────────────────────────────────────────────
+    def _feeds(self, until_ms: float, bn_lag: float = 5, bg_lag: float = 5, step: float = 100, start: float = 0):
+        """Background trades on Binance and Bitget books1 refreshes with given lags (same flat Bitget quote)."""
+        t = start
+        while t <= until_ms:
+            self.rec.add("binance-0", t, bnt("BTCUSDT", server_ms(t, bn_lag)))
+            self.rec.add("bitget-0", t + 1, bg("BTCUSDT", *BG_FLAT, ts=server_ms(t + 1, bg_lag)))
+            t += step
+
+    def test_clean_feeds_mark_the_episode_normal(self):
+        self._feeds(990)
+        self._spike()
+        e = run(self.rec)["episodes"][0]
+        self.assertEqual(e["feed"], "normal")
+
+    def test_episode_opened_while_bitget_feed_is_late_is_flagged(self):
+        self._feeds(900)
+        self.rec.add("bitget-0", 995, bg("BTCUSDT", *BG_FLAT, ts=server_ms(995, 65)))    # 60 ms over its floor
+        self._spike()
+        e = run(self.rec, feed_lag_ms=20)["episodes"][0]
+        self.assertEqual(e["feed"], "late")
+        self.assertAlmostEqual(e["lag_excess_ms"]["bitget"], 60.0, places=3)
+
+    def test_episode_opened_while_binance_feed_is_late_is_flagged(self):
+        self._feeds(900)
+        self.rec.add("binance-0", 995, bnt("BTCUSDT", server_ms(995, 45)))              # 40 ms over its floor
+        self._spike()
+        e = run(self.rec, feed_lag_ms=20)["episodes"][0]
+        self.assertEqual(e["feed"], "late")
+        self.assertAlmostEqual(e["lag_excess_ms"]["binance"], 40.0, places=3)
+
+    def test_lag_under_the_threshold_stays_normal(self):
+        self._feeds(900)
+        self.rec.add("bitget-0", 995, bg("BTCUSDT", *BG_FLAT, ts=server_ms(995, 20)))    # 15 ms over the floor
+        self._spike()
+        self.assertEqual(run(self.rec, feed_lag_ms=20)["episodes"][0]["feed"], "normal")
+
+    def test_an_implausible_venue_timestamp_is_not_a_lag_sample(self):
+        self._feeds(900)
+        self.rec.add("bitget-0", 995, bg("BTCUSDT", *BG_FLAT, ts=1))                     # 1970: not a clock reading
+        self._spike()
+        self.assertEqual(run(self.rec, feed_lag_ms=20)["episodes"][0]["feed"], "normal")
+
+    def test_without_lag_samples_the_feed_state_is_unknown(self):
+        self._spike()                                             # setUp quotes carry no usable timestamps
+        self.assertEqual(run(self.rec)["episodes"][0]["feed"], "unknown")
+
+    def test_an_old_lag_sample_does_not_count(self):
+        self._feeds(200)                                          # last samples at 200 ms
+        self._spike(up_ms=5000, down_ms=5040)                     # 4.8 s later: no recent sample
+        self.assertEqual(run(self.rec)["episodes"][0]["feed"], "unknown")
+
+    def test_lag_floor_follows_a_clock_step(self):
+        # a constant +30 ms (venue clock or our clock stepped) for 15 minutes is the new normal, not a late feed
+        self._feeds(990, bn_lag=5, bg_lag=5)
+        self._feeds(16 * 60_000, bn_lag=35, bg_lag=35, step=1000, start=1000)
+        self._spike(up_ms=16 * 60_000 + 10, down_ms=16 * 60_000 + 50)
+        e = run(self.rec, feed_lag_ms=20)["episodes"][0]
+        self.assertEqual(e["feed"], "normal")
+
+    def test_capture_is_also_reported_for_normal_feeds_only(self):
+        self._feeds(900)
+        self.rec.add("bitget-0", 995, bg("BTCUSDT", *BG_FLAT, ts=server_ms(995, 65)))
+        self._spike()                                             # late episode: $3 at 10 ms
+        self._spike(up_ms=3000, down_ms=3040)                     # stale lag sample (2 s) -> unknown
+        res = run(self.rec, feed_lag_ms=20)
+        a = res["agg"][(20, "BTCUSDT", "bitget")]
+        self.assertAlmostEqual(a["cap_usd"][0], 6.0, places=6)
+        self.assertAlmostEqual(a["cap_usd_normal"][0], 0.0, places=6)
+        self.assertEqual(a["feed"], {"late": 1, "unknown": 1})
+
+    def test_report_shows_feed_lag(self):
+        self._feeds(990)
+        self._spike()
+        out = pa.report(run(self.rec))
+        for head in ("Keterlambatan feed", "Feed telat saat buka", "$/hari (feed normal)"):
+            self.assertIn(head, out)
 
     # ── report ─────────────────────────────────────────────────────────────────────────────────────────────────────
     def test_report_and_cli_render(self):
