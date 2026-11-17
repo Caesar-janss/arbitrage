@@ -44,6 +44,24 @@ BITGET_ODD = {
     "ENVERRUSDT": (200, {"code": "40015", "data": []}),
     "PARAMUSDT": (400, {"code": "40034", "msg": "Parameter does not exist"}),
 }
+# perp preflight: Binance answers with the FULL futures list, Bitget per symbol (productType=USDT-FUTURES)
+PERP_BINANCE_ROWS = [
+    {"symbol": "BTCUSDT", "status": "TRADING", "contractType": "PERPETUAL"},
+    {"symbol": "ETHUSDT", "status": "TRADING", "contractType": "PERPETUAL"},
+    {"symbol": "SETLUSDT", "status": "SETTLING", "contractType": "PERPETUAL"},
+    {"symbol": "QTRUSDT", "status": "TRADING", "contractType": "CURRENT_QUARTER"},
+    {"symbol": "MAINTUSDT", "status": "TRADING", "contractType": "PERPETUAL"},
+    {"symbol": "NOBGUSDT", "status": "TRADING", "contractType": "PERPETUAL"},
+    {"symbol": "BGODDUSDT", "status": "TRADING", "contractType": "PERPETUAL"},
+    {"symbol": "BGPARAMUSDT", "status": "TRADING", "contractType": "PERPETUAL"},
+]
+PERP_BITGET = {"BTCUSDT": "normal", "ETHUSDT": "normal", "SETLUSDT": "normal", "QTRUSDT": "normal", "NOBNUSDT": "normal",
+               "MAINTUSDT": "maintain"}
+PERP_BITGET_ODD = {"BGODDUSDT": (400, None), "BGPARAMUSDT": (400, {"code": "40034", "msg": "Parameter does not exist"})}
+# Binance USDⓈ-M routing since 2026-04-23: high-frequency streams on /public, the rest on /market; a stream on the
+# wrong path gets no data (developers.binance.com, "Important WebSocket Change Notice")
+BINANCE_PATH_STREAMS = {"/stream": None, "/public/stream": ("@bookticker", "@depth"),
+                        "/market/stream": ("@aggtrade", "@markprice", "@trade")}
 BINANCE_ODD = {
     "WRONGROWUSDT": (200, {"symbols": [{"symbol": "OTHERUSDT", "status": "BREAK"}]}),
     "B400USDT": (400, {"code": -1100, "msg": "Illegal characters found in a parameter."}),
@@ -107,7 +125,8 @@ class MockVenues:
 
     def reset(self, **cfg):
         self.cfg = {"close_after": None, "silent_after": None, "period_s": 0.004, "special": False, "mute": (),
-                    "mute_after": 0, **cfg}
+                    "mute_after": 0, "fapi": None, **cfg}
+        self.binance_paths: list[str] = []
         self.binance_pongs: list[bytes] = []
         self.bitget_pings: list[float] = []
         self.bitget_subs: list[dict] = []
@@ -157,8 +176,12 @@ class MockVenues:
                 c.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                            f"Sec-WebSocket-Accept: {accept}\r\n\r\n").encode())
                 c.settimeout(0.002)
-                if url.path == "/stream":
-                    self._binance(c, buf, urllib.parse.parse_qs(url.query)["streams"][0].split("/"))
+                if url.path in BINANCE_PATH_STREAMS:
+                    self.binance_paths.append(url.path)
+                    streams = urllib.parse.parse_qs(url.query)["streams"][0].split("/")
+                    ok = BINANCE_PATH_STREAMS[url.path]
+                    served = [x for x in streams if ok is None or any(t in x.lower() for t in ok)]
+                    self._binance(c, buf, served or streams, mute_all=not served)
                 else:
                     self._bitget(c, buf)
                 return
@@ -181,12 +204,18 @@ class MockVenues:
             st = BITGET_LISTED.get(sym, "online" if sym in BINANCE_ODD else None)
             # unknown symbol: authoritative success with no row (C-13: the only answer that may DROP a symbol)
             status, body = BITGET_ODD.get(sym) or ((200, {"code": "00000", "data": [{"symbol": sym, "status": st}]}) if st else (200, {"code": "00000", "data": []}))
+        elif url.path == "/fapi/v1/exchangeInfo":
+            status, body = self.cfg["fapi"] or (200, {"symbols": PERP_BINANCE_ROWS})
+        elif url.path == "/api/v2/mix/market/contracts" and q.get("productType", [""])[0] == "USDT-FUTURES":
+            st = PERP_BITGET.get(sym)
+            status, body = PERP_BITGET_ODD.get(sym) or ((200, {"code": "00000", "data": [{"symbol": sym, "symbolStatus": st}]})
+                                                       if st else (200, {"code": "00000", "data": []}))
         else:
             status, body = 404, {}
         data = b"<html>bad gateway</html>" if body is None else json.dumps(body).encode()
         c.sendall(f"HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {len(data)}\r\nConnection: close\r\n\r\n".encode() + data)
 
-    def _binance(self, c, buf, streams):
+    def _binance(self, c, buf, streams, mute_all: bool = False):
         self.ws_sessions["binance"] += 1
         frames = _ClientFrames(c, buf)
         c.sendall(_frame(0x9, b"binance-ping-payload"))
@@ -204,7 +233,7 @@ class MockVenues:
                 time.sleep(0.01)
                 continue
             s = streams[sent % len(streams)]
-            if s in self.cfg["mute"] and sent >= self.cfg["mute_after"]:   # this one stream goes dead, the rest flow
+            if mute_all or (s in self.cfg["mute"] and sent >= self.cfg["mute_after"]):   # this one stream goes dead, the rest flow
                 sent += 1
                 continue
             now = int(time.time() * 1000)
@@ -496,6 +525,72 @@ class RecorderTests(unittest.TestCase):
         self._record(self._specs()[:1], ten_visible, timeout=4.0, flush_s=0.3)
         self.assertGreaterEqual(seen["n"], 10, "tail of an idle feed never reached the file while running")
 
+    # ── perp ────────────────────────────────────────────────────────────────────────────────────────────────────
+    def _perp_specs(self, symbols=("BTCUSDT", "ETHUSDT")):
+        specs = md.build_specs("perp", ["binance", "bitget"], list(symbols), binance=("127.0.0.1", self.mock.port),
+                               bitget=("127.0.0.1", self.mock.port))
+        for s in specs:
+            s.keepalive_s = 0.2
+        return specs
+
+    def test_perp_records_every_stream_on_its_endpoint(self):
+        self.mock.reset()
+        specs = self._perp_specs()
+        conns = [s.name for s in specs]
+        self._record(specs, lambda: self._all_streams_seen(*conns))
+        self.assertTrue(self._all_streams_seen(*conns), [self._conn(c)["streams"] for c in conns])
+        self.assertEqual(set(self.mock.binance_paths), {"/public/stream", "/market/stream"})
+        subs = {(a["instType"], a["channel"]) for a in self.mock.bitget_subs}
+        self.assertEqual(subs, {("USDT-FUTURES", c) for c in ("books1", "books15", "trade", "ticker")})
+
+    def test_perp_preflight_keeps_only_perpetuals_trading_on_both(self):
+        logs = []
+        syms = ["BTCUSDT", "ETHUSDT", "SETLUSDT", "QTRUSDT", "NOBNUSDT", "MAINTUSDT", "NOBGUSDT"]
+        keep = md.preflight_perp(syms, self.ctx, binance=("127.0.0.1", self.mock.port),
+                                 bitget=("127.0.0.1", self.mock.port), log=logs.append)
+        self.assertEqual(keep, ["BTCUSDT", "ETHUSDT"])
+        for s in syms[2:]:
+            self.assertTrue(any(s in l and "DROP" in l for l in logs), s)
+
+    def test_perp_preflight_drops_only_on_an_authoritative_answer(self):
+        logs = []
+        keep = md.preflight_perp(["BTCUSDT", "BGODDUSDT", "BGPARAMUSDT"], self.ctx, binance=("127.0.0.1", self.mock.port),
+                                 bitget=("127.0.0.1", self.mock.port), log=logs.append)
+        self.assertEqual(keep, ["BTCUSDT", "BGODDUSDT", "BGPARAMUSDT"])
+        self.assertTrue(any("BGODDUSDT" in l and "not checked" in l for l in logs))
+
+    def test_perp_preflight_without_a_usable_binance_list_checks_only_bitget(self):
+        for fapi in ((503, {"code": -1001, "msg": "Internal error"}), (200, {"symbols": []}), (200, None)):
+            self.mock.reset(fapi=fapi)
+            logs = []
+            keep = md.preflight_perp(["BTCUSDT", "NOBNUSDT", "QTRUSDT", "NOBGUSDT"], self.ctx,
+                                     binance=("127.0.0.1", self.mock.port), bitget=("127.0.0.1", self.mock.port),
+                                     log=logs.append)
+            self.assertEqual(keep, ["BTCUSDT", "NOBNUSDT", "QTRUSDT"], fapi)    # Bitget still drops NOBGUSDT
+            self.assertTrue(any("Binance" in l and "not checked" in l for l in logs), fapi)
+
+    def test_perp_cli_uses_the_perp_preflight_and_perp_hosts(self):
+        from unittest import mock
+        seen = {}
+
+        def fake_record(specs, out, ctx, stop, **kw):
+            seen["specs"] = specs
+            return 0
+        with mock.patch.object(md, "preflight_perp", side_effect=lambda syms, ctx: syms[:2]) as pp, \
+                mock.patch.object(md, "preflight", side_effect=AssertionError("spot preflight used")), \
+                mock.patch.object(md, "record", side_effect=fake_record), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(md.main(["--market", "perp", "--out", self.out]), 0)
+        pp.assert_called_once()
+        self.assertTrue(seen["specs"])
+        self.assertEqual({(s.host, s.port) for s in seen["specs"]}, {("fstream.binance.com", 443), ("ws.bitget.com", 443)})
+
+    def test_perp_cli_rejects_an_unknown_market(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+            md.main(["--market", "options", "--out", self.out])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("invalid choice", err.getvalue())                   # not "unrecognized arguments"
+
     # ── preflight ───────────────────────────────────────────────────────────────────────────────────────────────
     def test_c13_preflight_drops_only_on_an_authoritative_answer(self):
         logs = []
@@ -708,6 +803,40 @@ class FileAndParseTests(unittest.TestCase):
         b = md.binance_specs(md.DEFAULT_SYMBOLS, "h", 9443)
         self.assertEqual(len(b), 1)
         self.assertIn("btcusdt@depth20@100ms", b[0].path)
+
+    # ── perpetual futures (--market perp) ─────────────────────────────────────────────────────────────────────────
+    def test_perp_specs_route_each_binance_stream_to_its_endpoint(self):
+        specs = md.build_specs("perp", ["binance", "bitget"], md.DEFAULT_SYMBOLS)
+        bn = [s for s in specs if s.venue == "binance"]
+        self.assertTrue(bn and all((s.host, s.port) == ("fstream.binance.com", 443) for s in bn))
+        pub = [s for s in bn if s.path.startswith("/public/stream?streams=")]
+        mkt = [s for s in bn if s.path.startswith("/market/stream?streams=")]
+        self.assertEqual(len(pub) + len(mkt), len(bn))
+        self.assertTrue(all(k.endswith(("@bookticker", "@depth20@100ms")) for s in pub for k in s.streams))
+        self.assertTrue(all(k.endswith(("@aggtrade", "@markprice@1s")) for s in mkt for k in s.streams))
+        self.assertIn("btcusdt@markPrice@1s", mkt[0].path)                     # stream names are case sensitive
+        self.assertEqual(sum(len(s.streams) for s in bn), 4 * len(md.DEFAULT_SYMBOLS))
+        names = [s.name for s in specs]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertTrue(all(n.split("-")[0] == s.venue for n, s in zip(names, specs)))
+        bg = [s for s in specs if s.venue == "bitget"]
+        self.assertTrue(all((s.host, s.port, s.path) == ("ws.bitget.com", 443, "/v2/ws/public") for s in bg))
+        args = [a for s in bg for sub in s.subscribe for a in json.loads(sub)["args"]]
+        self.assertEqual({a["instType"] for a in args}, {"USDT-FUTURES"})
+        self.assertEqual({a["channel"] for a in args}, {"books1", "books15", "trade", "ticker"})
+        self.assertEqual(len(args), 4 * len(md.DEFAULT_SYMBOLS))
+        for s in bg:
+            self.assertLessEqual(len(s.streams), 40)
+            for sub in s.subscribe:
+                self.assertLessEqual(len(json.loads(sub)["args"]), 20)
+
+    def test_spot_specs_are_unchanged(self):
+        specs = md.build_specs("spot", ["binance", "bitget"], ["BTCUSDT"])
+        bn = [s for s in specs if s.venue == "binance"]
+        self.assertEqual([(s.host, s.port, s.path.split("?")[0]) for s in bn], [("stream.binance.com", 9443, "/stream")])
+        args = [a for s in specs if s.venue == "bitget" for sub in s.subscribe for a in json.loads(sub)["args"]]
+        self.assertEqual({a["instType"] for a in args}, {"SPOT"})
+        self.assertEqual({a["channel"] for a in args}, set(md.BITGET_CHANNELS))
 
     def test_hourly_rotation_and_a_restart_in_the_same_hour(self):
         H = 3_600_000_000_000

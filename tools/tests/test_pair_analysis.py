@@ -44,6 +44,23 @@ def bnt(sym: str, event_ms: int) -> str:
             % (sym.lower(), event_ms, sym, event_ms))
 
 
+def fbn(sym: str, bid: float, bid_q: float, ask: float, ask_q: float, event_ms: int) -> str:
+    """Binance USDⓈ-M bookTicker: unlike spot it carries the venue event time E."""
+    return ('{"stream":"%s@bookTicker","data":{"e":"bookTicker","u":1,"E":%d,"T":%d,"s":"%s","b":"%s","B":"%s","a":"%s",'
+            '"A":"%s"}}' % (sym.lower(), event_ms, event_ms, sym, bid, bid_q, ask, ask_q))
+
+
+def bnagg(sym: str, event_ms: int) -> str:
+    return ('{"stream":"%s@aggTrade","data":{"e":"aggTrade","E":%d,"a":1,"s":"%s","p":"100","q":"1","f":1,"l":1,"T":%d,'
+            '"m":true}}' % (sym.lower(), event_ms, sym, event_ms))
+
+
+def bgf(sym: str, bid: float, bid_q: float, ask: float, ask_q: float, ts: int) -> str:
+    """Bitget USDT-FUTURES books1 (no checksum, seq/pseq before ts)."""
+    return ('{"action":"snapshot","arg":{"instType":"USDT-FUTURES","channel":"books1","instId":"%s"},"data":[{"asks":[["%s",'
+            '"%s"]],"bids":[["%s","%s"]],"seq":2,"pseq":1,"ts":"%d"}],"ts":1}' % (sym, ask, ask_q, bid, bid_q, ts))
+
+
 def server_ms(ms: float, lag_ms: float, base_ns: int = None) -> int:
     """Venue timestamp of a message we receive at `ms` (test clock) after a feed lag of `lag_ms`."""
     return int(((BASE_NS if base_ns is None else base_ns) // 1_000_000) + ms - lag_ms)
@@ -311,6 +328,32 @@ class PairAnalysisTest(unittest.TestCase):
         out = pa.report(run(self.rec))
         for head in ("Keterlambatan feed", "Feed telat saat buka", "$/hari (feed normal)"):
             self.assertIn(head, out)
+
+    # ── perpetual futures recordings ─────────────────────────────────────────────────────────────────────────────
+    def test_perp_bookticker_event_time_is_a_binance_lag_sample(self):
+        for t in range(0, 1000, 100):                            # no trade stream at all: quotes alone carry E
+            self.rec.add("binance-0", t, fbn("BTCUSDT", *BN_FLAT, server_ms(t, 4)))
+            self.rec.add("bitget-0", t + 1, bgf("BTCUSDT", *BG_FLAT, server_ms(t + 1, 6)))
+        self.rec.add("binance-0", 1000, fbn("BTCUSDT", 100.50, 10, 100.52, 10, server_ms(1000, 4)))
+        self.rec.add("binance-0", 1040, fbn("BTCUSDT", *BN_FLAT, server_ms(1040, 4)))
+        res = run(self.rec)
+        e = res["episodes"][0]
+        self.assertEqual((e["buy"], e["sell"], e["feed"]), ("bitget", "binance", "normal"))
+        self.assertGreater(sum(res["feedlag"].raw["binance"].values()), 10)
+
+    def test_perp_aggtrade_event_time_is_a_binance_lag_sample(self):
+        for t in range(0, 1000, 100):
+            self.rec.add("binance-m0", t, bnagg("BTCUSDT", server_ms(t, 4)))
+            self.rec.add("bitget-0", t + 1, bgf("BTCUSDT", *BG_FLAT, server_ms(t + 1, 6)))
+        self.rec.add("binance-m0", 995, bnagg("BTCUSDT", server_ms(995, 44)))                # 40 ms late
+        self._spike()
+        self.assertEqual(run(self.rec, feed_lag_ms=20)["episodes"][0]["feed"], "late")
+
+    def test_perp_usdt_futures_books1_is_parsed(self):
+        self.rec.add("bitget-0", 2000, bgf("BTCUSDT", 100.60, 10, 100.62, 10, server_ms(2000, 5)))
+        self.rec.add("bitget-0", 2010, bgf("BTCUSDT", *BG_FLAT, server_ms(2010, 5)))
+        e = run(self.rec)["episodes"][0]
+        self.assertEqual((e["buy"], e["sell"], e["opener"], e["closer"]), ("binance", "bitget", "bitget", "bitget"))
 
     # ── report ─────────────────────────────────────────────────────────────────────────────────────────────────────
     def test_report_and_cli_render(self):
