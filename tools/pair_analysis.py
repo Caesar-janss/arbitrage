@@ -303,11 +303,15 @@ def analyse(root: str, since_ns: Optional[int] = None, symbols: Optional[set] = 
             if not payload.startswith('{"stream":"'):
                 continue
             if payload.find('@bookTicker"', 11, 60) < 0:
-                if payload.find('@trade"', 11, 60) > 0:          # trades carry the venue clock (E), quotes do not
+                # spot quotes carry no venue clock, trades do (E); perp: aggTrade
+                if payload.find('@trade"', 11, 60) > 0 or payload.find('@aggTrade"', 11, 60) > 0:
                     m = _BN_E.search(payload, 0, 200)
                     if m:
                         feed.add("binance", ns, int(m[1]))
                 continue
+            m = _BN_E.search(payload, 0, 120)                 # USDⓈ-M bookTicker carries E itself
+            if m:
+                feed.add("binance", ns, int(m[1]))
             p = parse_binance(payload)
         else:
             if not payload.startswith('{"action"') or payload.find('"channel":"books1"', 0, 120) < 0:
