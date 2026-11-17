@@ -52,6 +52,25 @@ Kecepatan terukur (container builder, 1,25 juta baris sintetis dengan campuran p
   terkuantisasi 10 ms** (dugaan builder salah). Tetapi terima − `ts` Bitget p50 7–11 ms, **p99 57–77 ms**: sebanding
   dengan durasi episode, sehingga sebagian "kutipan basi" mungkin hanya basi di layar kita. Itu alasan kolom feed telat.
 
+## 3b. Hasil 5,8 hari (2026-11-11 14:48Z → 11-17 09:59Z) dan keputusan
+
+| Fee kedua leg | $/hari, L = 10 ms, semua | $/hari, L = 10 ms, feed normal |
+|---|---|---|
+| 20 bps | 68 | 11 |
+| 15 bps | 177 | 24 |
+| 10 bps | 531 | 67 |
+
+- 162 episode/hari (fee 20). Sampel 6 jam sebelumnya melebih-lebihkan OP sekitar 23× (424 vs 18,6 per hari).
+- Feed Binance stabil (kelebihan p99 4 ms). Feed Bitget: kelebihan p50 12 ms, p99 116 ms.
+- Koin besar: 81–100 % episode dibuka saat feed Bitget telat (BTC 100 %, ETH 96 %, XRP 97 %, SOL 95 %).
+- Pola tetap lonjakan Binance yang kembali sendiri (dibuka Binance 80–100 %, ditutup Bitget 10–30 %).
+- $/hari didominasi segelintir episode (L = 100 ms > L = 50 ms).
+
+**Kesimpulan builder: spot Binance ↔ Bitget dengan taker di kedua leg tidak layak** (batas atas ≈ $11/hari feed normal
+sebelum pesaing, kegagalan order, dan inventori searah; VM ≈ $2,6/hari). Fee lebih menentukan daripada kecepatan
+(10 bps ≈ 6× hasil 20 bps), maka langkah berikut: rekaman perp (fee jauh lebih rendah, tanpa transfer koin) dan funding
+(`docs/STAGE2_RECORDER.md` §8). Keputusan final: merge PR oleh Jansen.
+
 ## 4. Batas yang diketahui
 
 - Hanya level 1 dan hanya 16 simbol rekaman (majors + mid cap). Koin ekor dari laporan scanner (INIT, CC, …) tidak

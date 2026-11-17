@@ -10,7 +10,8 @@ Multi-Strategy Crypto Arbitrage Engine (Spatial + Funding Rate) — .NET 8 + Pos
 | S0 ✅ | Probe latency 24 jam Tokyo vs Singapura → **opsi (a)**: spatial Binance ↔ Bitget dari Tokyo, Bybit untuk funding/hedge (merge PR #5 = keputusan Jansen) | `docs/S0_LATENCY_PROBE.md`, `docs/S0_RESULTS.md` |
 | **2** | **Langkah 1 (sekarang): rekam market data Binance + Bitget di Tokyo, `python3 tools/md_recorder.py`** → langkah 2: ukur peluang nyata dari rekaman → baru adapter order entry; wajib membuktikan kewajiban I-1…I-3 (STAGE1_CORE §6.1) | `docs/STAGE2_RECORDER.md` |
 | 2 (langkah 2) | Analisis rekaman Binance ↔ Bitget pada resolusi milidetik: episode silang setelah fee, durasi, siapa yang bergerak dulu, sisa peluang bila order tiba L ms kemudian, `python3 tools/pair_analysis.py` | `docs/STAGE2_PAIR_ANALYSIS.md` |
-| 2 (paralel) | Spread scanner 8 venue (Binance, Bitget, Bybit, OKX, MEXC, Gate, KuCoin, Kraken), snapshot tiap 5 s: pasangan venue & koin mana yang selisihnya lolos fee dan bertahan, `python3 tools/spread_scanner.py` | `docs/STAGE2_SCANNER.md` |
+| 2 (langkah 3) | **Spot taker-taker: no-go** (5,8 hari: ≈ $11/hari batas atas pada feed normal, fee 20 bps). Rekam perp Binance USDⓈ-M + Bitget USDT-M + funding, `md_recorder.py --market perp` | `docs/STAGE2_PAIR_ANALYSIS.md` §3b, `docs/STAGE2_RECORDER.md` §8 |
+| 2 (paralel, dihentikan 2026-11-17) | Spread scanner 8 venue (Binance, Bitget, Bybit, OKX, MEXC, Gate, KuCoin, Kraken), snapshot tiap 5 s: pasangan venue & koin mana yang selisihnya lolos fee dan bertahan, `python3 tools/spread_scanner.py` | `docs/STAGE2_SCANNER.md` |
 
 ## Struktur
 ```

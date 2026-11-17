@@ -66,6 +66,16 @@ DEFAULT_SYMBOLS = [
 ]
 BINANCE_STREAMS = ("bookTicker", "depth20@100ms", "trade")
 BITGET_CHANNELS = ("books1", "books15", "trade")
+# --market perp. Binance USDⓈ-M routes streams by path since 2026-04-23 (legacy /stream retired): high-frequency public
+# data on /public, the rest on /market. markPrice@1s carries the funding rate (r) and next funding time (T); Bitget's
+# futures ticker carries fundingRate / nextFundingTime. Status: docs/STAGE2_RECORDER.md §8.
+BINANCE_PERP_PUBLIC = ("bookTicker", "depth20@100ms")
+BINANCE_PERP_MARKET = ("aggTrade", "markPrice@1s")
+BITGET_PERP_CHANNELS = ("books1", "books15", "trade", "ticker")
+MARKETS = {
+    "spot": {"binance": ("stream.binance.com", 9443), "bitget": ("ws.bitget.com", 443)},
+    "perp": {"binance": ("fstream.binance.com", 443), "bitget": ("ws.bitget.com", 443)},
+}
 EXIT_DISK_FULL = 3
 EXIT_THREAD_DIED = 1            # a connection thread ended on its own: exit so systemd restarts the whole recorder (B-09)
 MAX_FRAME = 64 << 20
@@ -215,14 +225,16 @@ def _chunks(xs: list, n: int) -> list[list]:
     return [xs[i:i + n] for i in range(0, len(xs), n)]
 
 
-def binance_specs(symbols: list[str], host: str, port: int, per_conn: int = 200) -> list[ConnSpec]:
-    streams = [f"{s.lower()}@{k}" for s in symbols for k in BINANCE_STREAMS]
-    return [ConnSpec(f"binance-{i}", "binance", host, port, "/stream?streams=" + "/".join(c), [x.lower() for x in c])
+def binance_specs(symbols: list[str], host: str, port: int, per_conn: int = 200, kinds: tuple = BINANCE_STREAMS,
+                  base: str = "/stream", prefix: str = "binance-") -> list[ConnSpec]:
+    streams = [f"{s.lower()}@{k}" for s in symbols for k in kinds]
+    return [ConnSpec(f"{prefix}{i}", "binance", host, port, f"{base}?streams=" + "/".join(c), [x.lower() for x in c])
             for i, c in enumerate(_chunks(streams, per_conn))]
 
 
-def bitget_specs(symbols: list[str], host: str, port: int, per_conn: int = 40, per_msg: int = 20) -> list[ConnSpec]:
-    args = [{"instType": "SPOT", "channel": ch, "instId": s} for s in symbols for ch in BITGET_CHANNELS]
+def bitget_specs(symbols: list[str], host: str, port: int, per_conn: int = 40, per_msg: int = 20,
+                 inst_type: str = "SPOT", channels: tuple = BITGET_CHANNELS) -> list[ConnSpec]:
+    args = [{"instType": inst_type, "channel": ch, "instId": s} for s in symbols for ch in channels]
     out = []
     for i, c in enumerate(_chunks(args, per_conn)):
         subs = [json.dumps({"op": "subscribe", "args": m}, separators=(",", ":")) for m in _chunks(c, per_msg)]
@@ -273,6 +285,26 @@ def classify(venue: str, text: str) -> tuple[str, Optional[str]]:
     if "action" in j and key:
         return "data", key
     return "other", None
+
+
+def build_specs(market: str, venues: list[str], symbols: list[str], binance: Optional[tuple] = None,
+                bitget: Optional[tuple] = None) -> list[ConnSpec]:
+    """All connections for one market. binance/bitget = (host, port) overrides (tests)."""
+    bn = binance or MARKETS[market]["binance"]
+    bg = bitget or MARKETS[market]["bitget"]
+    specs: list[ConnSpec] = []
+    if "binance" in venues:
+        if market == "spot":
+            specs += binance_specs(symbols, *bn)
+        else:
+            specs += binance_specs(symbols, *bn, kinds=BINANCE_PERP_PUBLIC, base="/public/stream", prefix="binance-")
+            specs += binance_specs(symbols, *bn, kinds=BINANCE_PERP_MARKET, base="/market/stream", prefix="binance-m")
+    if "bitget" in venues:
+        if market == "spot":
+            specs += bitget_specs(symbols, *bg)
+        else:
+            specs += bitget_specs(symbols, *bg, inst_type="USDT-FUTURES", channels=BITGET_PERP_CHANNELS)
+    return specs
 
 
 # ── output: one gzip file per connection per UTC hour ──────────────────────────────────────────────────────────────
@@ -608,6 +640,62 @@ def preflight(symbols: list[str], ctx: ssl.SSLContext, binance=("api.binance.com
     return keep
 
 
+def preflight_perp(symbols: list[str], ctx: ssl.SSLContext, binance=("fapi.binance.com", 443),
+                   bitget=("api.bitget.com", 443), timeout: float = 5.0, log: Callable[[str], None] = print) -> list[str]:
+    """
+    Same rule as preflight (C-13), for USDT-margined perpetuals:
+      Binance  ONE call for the whole futures list (/fapi/v1/exchangeInfo has no per-symbol filter). Authoritative only
+               when it is a 200 with a non-empty list: then a missing symbol is "not listed", a row with
+               contractType != PERPETUAL is "no perpetual" and status != TRADING is dropped.
+      Bitget   /api/v2/mix/market/contracts?productType=USDT-FUTURES&symbol=X: 200, code "00000", list without the
+               row = "not listed"; symbolStatus != "normal" is dropped.
+    Anything else keeps the symbol ("not checked").
+    """
+    rows: Optional[dict] = None
+    try:
+        st, j = _get_json(*binance, "/fapi/v1/exchangeInfo", ctx, timeout)
+        lst = j.get("symbols") if isinstance(j, dict) else None
+        if st == 200 and isinstance(lst, list) and lst:
+            rows = {r.get("symbol"): r for r in lst if isinstance(r, dict)}
+        else:
+            log(f"preflight: Binance futures list unusable (HTTP {st}), Binance not checked")
+    except (OSError, http.client.HTTPException) as e:
+        log(f"preflight: Binance futures unreachable ({type(e).__name__}), Binance not checked")
+    keep = []
+    for s in symbols:
+        verdicts = []
+        if rows is not None:
+            row = rows.get(s)
+            if row is None:
+                verdicts.append("Binance: no such futures symbol")
+            elif row.get("contractType") != "PERPETUAL":
+                verdicts.append(f"Binance: {row.get('contractType')}, not a perpetual")
+            elif row.get("status") != "TRADING":
+                verdicts.append(f"Binance: status {row.get('status')}")
+        try:
+            st, j = _get_json(*bitget, "/api/v2/mix/market/contracts?productType=USDT-FUTURES&symbol="
+                              + urllib.parse.quote(s), ctx, timeout)
+            data = j.get("data") if isinstance(j, dict) else None
+            if st == 200 and j.get("code") == "00000" and isinstance(data, list):
+                row = next((d for d in data if isinstance(d, dict) and d.get("symbol") == s), None)
+                if row is None:
+                    verdicts.append("Bitget: no such futures symbol")
+                elif not isinstance(row.get("symbolStatus"), str):
+                    log(f"preflight {s}: Bitget row without symbolStatus, not checked")
+                elif row["symbolStatus"] != "normal":
+                    verdicts.append(f"Bitget: symbolStatus {row['symbolStatus']}")
+            else:
+                code = j.get("code") if isinstance(j, dict) else None
+                log(f"preflight {s}: Bitget answered HTTP {st} (code {code}), not checked")
+        except (OSError, http.client.HTTPException) as e:
+            log(f"preflight {s}: Bitget unreachable ({type(e).__name__}), not checked")
+        if verdicts:
+            log(f"preflight: DROP {s} ({'; '.join(verdicts)})")
+        else:
+            keep.append(s)
+    return keep
+
+
 # ── host clock (for the replay: is recv time trustworthy?) ─────────────────────────────────────────────────────────
 def clock_status() -> dict:
     try:
@@ -880,6 +968,8 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--out", default="data/md", help="output directory (default data/md)")
     ap.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS), help="comma-separated, e.g. BTCUSDT,ETHUSDT")
     ap.add_argument("--venues", default="binance,bitget")
+    ap.add_argument("--market", choices=sorted(MARKETS), default="spot",
+                    help="spot (default) or perp: USDT-margined perpetual futures, incl. funding streams")
     ap.add_argument("--hours", type=float, default=None, help="stop after this many hours (default: until stopped)")
     ap.add_argument("--min-free-gb", type=float, default=5.0, help="stop cleanly when free disk drops below this")
     ap.add_argument("--status-s", type=float, default=60.0)
@@ -908,19 +998,15 @@ def main(argv: Optional[list] = None) -> int:
         ap.error("--symbols: comma-separated symbols like BTCUSDT")
     ctx = ssl.create_default_context()
     if not a.no_preflight:
-        symbols = preflight(symbols, ctx)
+        symbols = (preflight_perp if a.market == "perp" else preflight)(symbols, ctx)
         if not symbols:
             print("no symbol trades on both venues; nothing to record", file=sys.stderr)
             return 2
-    specs = []
-    if "binance" in venues:
-        specs += binance_specs(symbols, "stream.binance.com", 9443)
-    if "bitget" in venues:
-        specs += bitget_specs(symbols, "ws.bitget.com", 443)
+    specs = build_specs(a.market, venues, symbols)
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
-    print(f"recording {len(symbols)} symbols on {', '.join(venues)} into {os.path.abspath(a.out)}: "
+    print(f"recording {len(symbols)} {a.market} symbols on {', '.join(venues)} into {os.path.abspath(a.out)}: "
           + ", ".join(f"{s.name} ({len(s.streams)} streams)" for s in specs), flush=True)
     return record(specs, a.out, ctx, stop, hours=a.hours, status_s=a.status_s, min_free_gb=a.min_free_gb,
                   log=lambda m: print(m, flush=True))
