@@ -120,3 +120,10 @@ berganti sebelum T) salah. Tes sintetis PR #16 berganti tepat di T, jadi tidak m
 Tes dulu: `test_old_funding_time_still_shown_just_after_it_passed_is_a_settlement` merah terhadap basis; tes "label macet
 20 menit" ditambah (hijau di basis, menjaga batas 5 menit). Setelah perbaikan 17/17. Mutation 14/14 (dua mutan baru: label
 macet diterima, observasi sesudah T dihitung sebagai sebelum).
+
+## Laporan per koin dan funding per tahun (basis `a8fc071`)
+
+Tes ditulis dulu: 8 merah (pair: bergantian arah, hanya level utama, `top_share`, capture per episode, tabel §2b;
+funding: bruto/tahun, tanpa balik modal saat rugi, kolom lama hilang). Setelah implementasi 59/59 untuk kedua alat.
+Mutation 8/8 (`python3 -B`): bergantian di semua level, hitung pada arah sama, episode pertama dihitung pasangan, porsi
+terkecil, porsi pada data kosong, bruto dari net, balik modal saat rugi, balik modal per jam bukan per hari.

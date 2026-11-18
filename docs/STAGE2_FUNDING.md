@@ -40,6 +40,13 @@ baris ≈ 4–8 menit di VM. Hasil bermakna butuh beberapa settlement: interval 
 - **Basis mark**: Binance vs Bitget, sampel per menit. Perubahannya antara buka dan tutup ikut menjadi untung/rugi dan
   tidak termasuk di "net".
 
+## 3b. Hasil 24 jam pertama dan perubahan laporan (PR #18)
+
+48 settlement per venue (14 koin × 3 + WIF 4 jam × 6). Selisih rata-rata terbesar 0,64 bps/8 jam (ADA); BTC 0,52; sisanya
+≤ 0,48, beberapa berganti arah. Kolom lama "hold net/tahun" menyebar fee sekali bayar ke 17 jam lalu disetahunkan
+(−106 % dst.): menyesatkan, diganti **Bruto/tahun (sisi hold)** dan **Hari balik modal** = fee round trip ÷ funding per
+hari. Fee dasar terverifikasi 2026-11-18 (`docs/GAP_REVIEW_2026-11-18.md` G-20).
+
 ## 4. Batas yang diketahui
 
 - Fee asumsi; fee maker bisa jauh lebih rendah tetapi berisiko tidak terisi.

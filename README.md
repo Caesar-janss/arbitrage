@@ -12,6 +12,7 @@ Multi-Strategy Crypto Arbitrage Engine (Spatial + Funding Rate) — .NET 8 + Pos
 | 2 (langkah 2) | Analisis rekaman Binance ↔ Bitget pada resolusi milidetik: episode silang setelah fee, durasi, siapa yang bergerak dulu, sisa peluang bila order tiba L ms kemudian, `python3 tools/pair_analysis.py` | `docs/STAGE2_PAIR_ANALYSIS.md` |
 | 2 (langkah 3) | **Spot taker-taker: no-go** (5,8 hari: ≈ $11/hari batas atas pada feed normal, fee 20 bps). Rekam perp Binance USDⓈ-M + Bitget USDT-M + funding, `md_recorder.py --market perp` | `docs/STAGE2_PAIR_ANALYSIS.md` §3b, `docs/STAGE2_RECORDER.md` §8 |
 | 2 (langkah 4) | Analisis funding Binance USDⓈ-M ↔ Bitget USDT-M dari rekaman perp: selisih funding per koin, hold/flip tanpa look-ahead, basis mark, `python3 tools/funding_analysis.py` | `docs/STAGE2_FUNDING.md` |
+| 2 (tinjauan) | Tinjauan celah menyeluruh: apa yang belum diukur/diverifikasi/dibangun, urutan dan usulan kriteria go | `docs/GAP_REVIEW_2026-11-18.md` |
 | 2 (paralel, dihentikan 2026-11-17) | Spread scanner 8 venue (Binance, Bitget, Bybit, OKX, MEXC, Gate, KuCoin, Kraken), snapshot tiap 5 s: pasangan venue & koin mana yang selisihnya lolos fee dan bertahan, `python3 tools/spread_scanner.py` | `docs/STAGE2_SCANNER.md` |
 
 ## Struktur
