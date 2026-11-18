@@ -62,13 +62,15 @@ class Rec:
         self.rows.setdefault((conn, hour), []).append((ms * 1_000_000, payload))
 
     def series(self, venue: str, rate, hours: float, interval_h: float = 8, sym: str = "BTCUSDT", step_min: int = 5,
-               mark=lambda t: 100.0, start_h: float = 0, skip=lambda t: False) -> None:
-        """One message every step_min minutes from start_h to hours; rate(t_hours) in bps; next funding on the grid."""
+               mark=lambda t: 100.0, start_h: float = 0, skip=lambda t: False, roll_lag_ms: int = 0) -> None:
+        """One message every step_min minutes from start_h to hours; rate(t_hours) in bps; next funding on the grid.
+        roll_lag_ms: the venue keeps showing the old funding time this long after it passed (md-tokyo 2026-11-17/18:
+        last old-time observation at T+0.07 s on Binance, T+0.2-0.4 s on Bitget; the switch at T+1.05 s / T+0.4-0.6 s)."""
         t = int(start_h * H_MS)
         while t <= hours * H_MS:
             th = t / H_MS
             if not skip(th):
-                nxt = T0_MS + (int(t // (interval_h * H_MS)) + 1) * int(interval_h * H_MS)
+                nxt = T0_MS + (int((t - roll_lag_ms) // (interval_h * H_MS)) + 1) * int(interval_h * H_MS)
                 ms = T0_MS + t
                 if venue == "binance":
                     self.add("binance-m0", ms, bmark(sym, rate(th), nxt, mark(th), ms - 2))
@@ -113,6 +115,23 @@ class FundingAnalysisTest(unittest.TestCase):
         self.assertEqual([s[0] for s in st], [T0_MS + 8 * H_MS, T0_MS + 16 * H_MS, T0_MS + 24 * H_MS])
         self.assertAlmostEqual(st[0][1], 3.0, places=6)          # just before 08:00: not earlier (1), not after (5)
         self.assertEqual({s[2] for s in st}, {8.0})
+
+    def test_old_funding_time_still_shown_just_after_it_passed_is_a_settlement(self):
+        # the real pattern: the observation at exactly T still carries the old funding time, the roll comes later
+        self.rec.series("binance", lambda t: 1.0 if t < 8 else 5.0, 24.5, roll_lag_ms=1_050)
+        self.rec.series("bitget", lambda t: -1.0 if t < 8 else 2.0, 24.5, roll_lag_ms=600)
+        res = self.run_()
+        for v, first in (("binance", 1.0), ("bitget", -1.0)):
+            st = res["settle"][v]["BTCUSDT"]
+            self.assertEqual([x[0] for x in st], [T0_MS + 8 * H_MS, T0_MS + 16 * H_MS, T0_MS + 24 * H_MS], v)
+            self.assertEqual({x[2] for x in st}, {8.0}, v)
+            # the settled rate is the last one seen BEFORE 08:00; a value shown at/after 08:00 under the old label may
+            # already be the new period's estimate (md-tokyo 00:00: 0.5973 before, 0.6014 after the switch)
+            self.assertAlmostEqual(st[0][1], first, places=6)
+
+    def test_old_funding_time_shown_long_after_it_passed_is_not_trusted(self):
+        self.rec.series("binance", lambda t: 1.0, 24.5, roll_lag_ms=20 * 60_000)    # stuck 20 min on a past time
+        self.assertEqual(self.run_()["settle"]["binance"].get("BTCUSDT", []), [])
 
     def test_four_hour_interval_is_detected(self):
         self.rec.series("bitget", lambda t: 1.0, 24.5, interval_h=4)

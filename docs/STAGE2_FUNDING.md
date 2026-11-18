@@ -24,9 +24,12 @@ baris ≈ 4–8 menit di VM. Hasil bermakna butuh beberapa settlement: interval 
 
 ## 3. Definisi
 
-- **Settlement**: saat waktu funding venue/simbol berpindah ke waktu yang lebih akhir *setelah* waktu itu lewat, rate
-  terakhir yang teramati sebelum perpindahan (paling lama 10 menit sebelum waktu funding) = rate yang di-settle. Pindah
-  sebelum waktunya (jadwal diubah venue) bukan settlement. Panjang periode = jarak ke settlement sebelumnya.
+- **Settlement** (diperbaiki di PR #17, temuan B-13): waktu funding venue berpindah ke waktu berikutnya **sesudah** waktu
+  itu lewat. Di md-tokyo: Binance ±1,05 s sesudahnya, Bitget ±0,4–0,6 s, dan observasi pada T+0,07…0,4 s masih membawa
+  label lama. Perpindahan dalam 5 menit sesudah T = settlement, dengan rate = observasi terakhir **sebelum** T (paling lama
+  10 menit sebelumnya). Nilai berlabel lama sesudah T bisa sudah estimasi periode baru (Binance 00:00: 0,5973 sebelum,
+  0,6014 sesudah). Pindah sebelum T (jadwal diubah) atau jauh sesudah T (label macet) bukan settlement. Panjang periode =
+  jarak ke settlement sebelumnya.
 - **Akrual per jam**: rate settle / panjang periode, sehingga venue dengan interval berbeda (mis. 8 jam vs 4 jam)
   dibandingkan per jam.
 - **Hold**: sisi ditentukan dari prediksi rate (observasi terakhir pada atau sebelum awal jam, paling tua 1 jam) di
@@ -46,5 +49,6 @@ baris ≈ 4–8 menit di VM. Hasil bermakna butuh beberapa settlement: interval 
 
 ## 5. Tes
 
-`tools/tests/test_funding_analysis.py` (15 tes; pesan nyata dari md-tokyo untuk parser). Mutation 12/12 tertangkap
+`tools/tests/test_funding_analysis.py` (17 tes; pesan nyata dari md-tokyo untuk parser, pola waktu pergantian nyata untuk
+settlement). Mutation 12/12 (PR #16) dan 14/14 (PR #17) tertangkap
 (`docs/review/stage2/REGRESSION_LOG.md`).

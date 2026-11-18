@@ -110,3 +110,13 @@ funding), dan kesegaran prediksi saat masuk (tes baru). Hasil 15 tes.
 | basis terbalik | 1/1 |
 
 12/12, `python3 -B`.
+
+## B-13 — settlement funding (basis `367b9bf`)
+
+Run pertama di md-tokyo (18,5 jam): settlement Binance 0, Bitget 1. Diagnosa di VM (BTC, kedua venue): label waktu funding
+berganti 0,4–1,05 s SESUDAH T, dan observasi terakhir berlabel lama jatuh sesudah T. Dugaan builder sebelumnya (label
+berganti sebelum T) salah. Tes sintetis PR #16 berganti tepat di T, jadi tidak menangkapnya.
+
+Tes dulu: `test_old_funding_time_still_shown_just_after_it_passed_is_a_settlement` merah terhadap basis; tes "label macet
+20 menit" ditambah (hijau di basis, menjaga batas 5 menit). Setelah perbaikan 17/17. Mutation 14/14 (dua mutan baru: label
+macet diterima, observasi sesudah T dihitung sebagai sebelum).

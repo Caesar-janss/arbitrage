@@ -124,6 +124,7 @@ ditegakkan di `TradeGroup`, bukan panggilan host opsional.
 | B-10 | S3 | `spread_scanner` laporan | tidak ada arah dominan per pasangan (peluang searah tidak bisa diulang) dan tidak ada indikator ticker REST basi | CONFIRMED | — | dua kolom baru + catatan hitung ganda |
 | B-11 | S3 | `spread_scanner` laporan | filter "book beku" hanya membuang episode bila KEDUA sisi tidak berubah; satu kutipan basi melawan kutipan hidup lolos sebagai peluang | OPEN (belum di-fix; dugaan untuk INIT ternyata salah, kutipannya hidup) | — | rencana: filter per leg + status transfer per koin |
 | B-12 | S4 | tooling mutation check | mutan dengan ukuran byte sama yang dipulihkan dalam detik yang sama memakai `.pyc` basi: tes bisa berjalan terhadap kode yang salah | CONFIRMED | `test_basis_is_the_median_mid_difference` gagal pada kode benar | mutasi dijalankan dengan `python3 -B`, `PYTHONDONTWRITEBYTECODE=1`, cache dihapus dulu |
+| B-13 | S2 | `funding_analysis` settlement | observasi terakhir berlabel waktu funding lama datang SESUDAH waktu funding (md-tokyo: Binance T+0,07 s, Bitget T+0,2–0,4 s), sedangkan aturan menuntutnya sebelum T: run 18,5 jam mendeteksi 0 settlement Binance dan 1 Bitget (seharusnya ±45 masing-masing) | CONFIRMED | `test_old_funding_time_still_shown_just_after_it_passed_is_a_settlement` merah | rate = observasi terakhir sebelum T, pergantian label diterima sampai 5 menit sesudah T; tes data sintetis kini meniru jeda nyata |
 
 Temuan non-kode dari audit yang sama (strategi, operasi): `docs/AUDIT_2026-11-12.md`.
 

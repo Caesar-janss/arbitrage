@@ -12,9 +12,10 @@ Shorts receive funding when the rate is positive, so short Binance / long Bitget
 Inputs
   Binance  <sym>@markPrice@1s   "r" = funding rate of the running period, "T" = its funding time, "p" = mark price
   Bitget   ticker (USDT-FUTURES) "fundingRate", "nextFundingTime", "markPrice"
-Settlement: the funding time T of a venue/symbol rolls to a later time once T has passed. The rate observed last before
-that roll (and no more than 10 minutes before T) is taken as the settled rate of the period that ended at T. A roll
-before T (the venue moved its schedule) is not a settlement. Period length = time since the previous settlement, or
+Settlement: the funding time T of a venue/symbol rolls to a later time once T has passed (on md-tokyo 0.4-1.1 s after
+T; observations at T+0.07..0.4 s still carry the old T). A roll within 5 minutes after T settles the period at the last
+rate observed BEFORE T (no more than 10 minutes before). A roll before T (the venue moved its schedule) or long after T
+(stuck label) is not a settlement. Period length = time since the previous settlement, or
 the next period's length for the first one.
 
 Per hour H in which both venues' funding is known: spread(H) = rate_bn/len_bn - rate_bg/len_bg (bps per hour).
@@ -44,6 +45,7 @@ import md_recorder as md  # noqa: E402  (same file format, same reader)
 H_MS = 3_600_000
 SAMPLE_MS = 60_000                 # keep one observation per venue/symbol per minute
 SETTLE_FRESH_MS = 600_000          # the last observation before a funding time must be this recent to count
+ROLL_GRACE_MS = 300_000            # venues switch to the next funding time ~0.4-1.1 s after it (md-tokyo); allow 5 min
 PRED_FRESH_MS = H_MS               # a prediction older than this is no prediction
 DEFAULT_RT_BPS = 22.0
 DEFAULT_HYST_BPS = 0.5
@@ -104,27 +106,30 @@ def pct(xs: list, q: float) -> Optional[float]:
 # ── per venue: observations and settlements ────────────────────────────────────────────────────────────────────────
 class Track:
     """One venue, one symbol: sampled observations and detected settlements."""
-    __slots__ = ("obs_ms", "obs_rate", "obs_mark", "last_ms", "last_rate", "next_ms", "settles")
+    __slots__ = ("obs_ms", "obs_rate", "obs_mark", "pre_ms", "pre_rate", "next_ms", "settles")
 
     def __init__(self):
         self.obs_ms: list = []
         self.obs_rate: list = []
         self.obs_mark: list = []
-        self.last_ms: Optional[int] = None
-        self.last_rate: Optional[float] = None
+        self.pre_ms: Optional[int] = None             # last observation before the funding time it is labelled with
+        self.pre_rate: Optional[float] = None
         self.next_ms: Optional[int] = None
         self.settles: list = []                       # (funding_ms, rate_bps, period_h)
 
     def add(self, ms: int, rate: float, nxt: int, mark: float) -> None:
         if self.next_ms is not None and nxt > self.next_ms:
             t = self.next_ms
-            if ms >= t and self.last_ms is not None and t - SETTLE_FRESH_MS <= self.last_ms < t:
+            # a switch within ROLL_GRACE_MS after t settles the period at the last rate seen before t; a switch before
+            # t is a schedule change, a much later one means the venue's label was stuck: neither is trusted
+            if t <= ms <= t + ROLL_GRACE_MS and self.pre_ms is not None and t - SETTLE_FRESH_MS <= self.pre_ms < t:
                 prev = self.settles[-1][0] if self.settles else None
                 h = (t - prev) / H_MS if prev is not None and t - prev <= 24 * H_MS else (nxt - t) / H_MS
-                self.settles.append((t, self.last_rate, h))
+                self.settles.append((t, self.pre_rate, h))
         if self.next_ms is None or nxt != self.next_ms:
             self.next_ms = nxt
-        self.last_ms, self.last_rate = ms, rate
+        if ms < self.next_ms:
+            self.pre_ms, self.pre_rate = ms, rate
         if not self.obs_ms or ms - self.obs_ms[-1] >= SAMPLE_MS:
             self.obs_ms.append(ms)
             self.obs_rate.append(rate)
