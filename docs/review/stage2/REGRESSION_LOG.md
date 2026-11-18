@@ -127,3 +127,11 @@ Tes ditulis dulu: 8 merah (pair: bergantian arah, hanya level utama, `top_share`
 funding: bruto/tahun, tanpa balik modal saat rugi, kolom lama hilang). Setelah implementasi 59/59 untuk kedua alat.
 Mutation 8/8 (`python3 -B`): bergantian di semua level, hitung pada arah sama, episode pertama dihitung pasangan, porsi
 terkecil, porsi pada data kosong, bruto dari net, balik modal saat rugi, balik modal per jam bukan per hari.
+
+## Langkah 5 — `tools/perp_study.py` (basis `943caee`)
+
+Tes ditulis dulu (merah: modul belum ada). Putaran pertama: 16/18 hijau; dua gagal karena tes builder sendiri (waktu
+relatif vs epoch → kini nanodetik integer; tes CLI memakai `--close-bps` default 2 sedangkan jalan balik −3 bps, dan
+mengharapkan kata "converged" padahal kolom berisi jumlah). Mutation 14/15 di putaran pertama: jendela baseline 10× lebih
+lebar lolos (tes hanya punya satu trade di dalam dan satu di luar) → `test_a_trade_just_outside_the_equal_window_is_not_baseline`
+→ 15/15 (`python3 -B`).
