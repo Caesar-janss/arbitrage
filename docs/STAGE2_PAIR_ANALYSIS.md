@@ -71,6 +71,16 @@ sebelum pesaing, kegagalan order, dan inventori searah; VM ≈ $2,6/hari). Fee l
 (10 bps ≈ 6× hasil 20 bps), maka langkah berikut: rekaman perp (fee jauh lebih rendah, tanpa transfer koin) dan funding
 (`docs/STAGE2_RECORDER.md` §8). Keputusan final: merge PR oleh Jansen.
 
+## 3c. Perp, 19 jam (2026-11-17 14:46Z → 11-18 09:59Z) dan perubahan laporan (PR #18)
+
+- Fee 11 bps (taker Binance 5 + Bitget 6), L = 10 ms: $814/hari semua episode, **$244/hari feed normal**; fee 8: $1.650 /
+  $564. Belum layak dipercaya: (1) di perp posisi harus ditutup, satu putaran penuh taker = 22 bps; (2) $/hari tidak
+  monoton terhadap L, tanda segelintir episode besar; (3) banyak baris berisi 1 kejadian; (4) kelebihan lag feed Binance
+  perp p99 266 ms (spot 4 ms).
+- PR #18 menambah §2b per koin: episode/hari, **bergantian arah** (dari dua episode berurutan, berapa % arahnya berganti:
+  tinggi = posisi bisa ditutup di episode berikutnya), $/hari semua dan feed normal, serta **porsi 10 episode terbesar**.
+  Untuk perp jalankan dengan `--fee-levels 22,15,11,8` (22 = buka + tutup taker, 15 = buka taker + tutup maker).
+
 ## 4. Batas yang diketahui
 
 - Hanya level 1 dan hanya 16 simbol rekaman (majors + mid cap). Koin ekor dari laporan scanner (INIT, CC, …) tidak

@@ -165,6 +165,26 @@ class FundingAnalysisTest(unittest.TestCase):
         self.assertAlmostEqual(r["hold_net"], 7.0, places=6)
         self.assertEqual(r["hold_dir"], "short binance / long bitget")
 
+    def test_yearly_gross_and_days_to_recover_the_round_trip(self):
+        self._flat(2.0, -1.0)                                     # 0.375 bps per hour for the hold side
+        r = self.run_(roundtrip_bps=2.0)["sym"]["BTCUSDT"]
+        self.assertAlmostEqual(r["hold_gross_yr_pct"], 0.375 * 8760 / 100, places=6)
+        self.assertAlmostEqual(r["breakeven_days"], 2.0 / (0.375 * 24), places=6)
+
+    def test_no_break_even_when_the_hold_side_loses(self):
+        self.rec.series("binance", lambda t: 2.0 if t < 12 else -2.0, 24.5)
+        self.rec.series("bitget", lambda t: 0.0, 24.5)
+        r = self.run_(roundtrip_bps=2.0)["sym"]["BTCUSDT"]
+        self.assertLess(r["hold_gross"], 0)
+        self.assertIsNone(r["breakeven_days"])
+
+    def test_report_shows_yearly_gross_not_a_yearly_fee(self):
+        self._flat(2.0, -1.0)
+        out = fa.report(self.run_(roundtrip_bps=22.0))
+        self.assertIn("Bruto/tahun", out)
+        self.assertIn("Hari balik modal", out)
+        self.assertNotIn("Hold net/tahun", out)
+
     def test_hold_takes_the_side_the_prediction_points_to(self):
         self._flat(-2.0, 1.0)
         r = self.run_()["sym"]["BTCUSDT"]

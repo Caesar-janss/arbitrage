@@ -229,6 +229,8 @@ def analyse(root: str, since_ns: Optional[int] = None, symbols: Optional[set] = 
             "spread_8h": sum(spread[H] for H in hours) / len(hours) * 8,
             "hold_dir": "short binance / long bitget" if d0 > 0 else "long binance / short bitget",
             "hold_gross": hold, "hold_net": hold - roundtrip_bps,
+            "hold_gross_yr_pct": hold / len(hours) * 8760 / 100,
+            "breakeven_days": roundtrip_bps / (hold / len(hours) * 24) if hold > 0 else None,
             "flip_gross": flip, "flip_switches": switches, "flip_net": flip - roundtrip_bps * (1 + switches),
             "oracle_gross": abs(sum(spread[H] for H in hours)),
             "oracle_net": abs(sum(spread[H] for H in hours)) - roundtrip_bps,
@@ -263,19 +265,21 @@ def report(res: dict) -> str:
     rows = sorted(res["sym"].items(), key=lambda kv: -kv[1]["flip_net"])
     out += ["## 2. Per koin (bps dari notional satu leg)", "",
             "| Simbol | Jam | Funding Binance rata2 (bps/8 j) | Bitget | Selisih rata2 (bps/8 j) | Hold: sisi | Hold net | "
-            "Hold net/tahun | Flip net (switch) | Sisi tetap terbaik, hindsight |",
-            "|---|---|---|---|---|---|---|---|---|---|"]
+            "Bruto/tahun (sisi hold) | Hari balik modal | Flip net (switch) | Sisi tetap terbaik, hindsight |",
+            "|---|---|---|---|---|---|---|---|---|---|---|"]
     for sym, r in rows:
-        yr = r["hold_net"] / r["hours"] * 8760 / 100 if r["hours"] else None
+        be = "tidak pernah" if r["breakeven_days"] is None else f"{r['breakeven_days']:,.1f}"
         out.append(f"| {sym} | {r['hours']} | {_f(r['bn_8h'])} | {_f(r['bg_8h'])} | {_f(r['spread_8h'])} | {r['hold_dir']} | "
-                   f"{_f(r['hold_net'])} | {_f(yr, 1)} % | {_f(r['flip_net'])} ({r['flip_switches']}) | "
+                   f"{_f(r['hold_net'])} | {_f(r['hold_gross_yr_pct'], 1)} % | {be} | {_f(r['flip_net'])} ({r['flip_switches']}) | "
                    f"{_f(r['oracle_net'])} |")
     if not rows:
-        out.append("| (belum ada jam dengan funding kedua venue) | | | | | | | | | |")
+        out.append("| (belum ada jam dengan funding kedua venue) | | | | | | | | | | |")
     out += ["",
             "**Hold** dan **flip** hanya memakai prediksi yang tersedia saat itu (tanpa melihat masa depan). **Sisi tetap "
             "terbaik** memakai hindsight: batas atas, bukan strategi. Net = funding diterima − fee round trip. "
-            "Per tahun = hold net diskalakan dari jam yang terukur; dengan data beberapa hari, angka ini sangat kasar. "
+            "**Bruto/tahun** = funding yang diterima sisi hold per jam, disetahunkan (tanpa fee, karena fee dibayar sekali "
+            "per posisi, bukan per tahun). **Hari balik modal** = fee round trip ÷ funding per hari; 'tidak pernah' = sisi "
+            "hold merugi. Dengan data beberapa hari, keduanya sangat kasar. "
             "Modal yang dibutuhkan = margin di kedua venue (dua leg), jadi imbal hasil per modal bergantung leverage.", ""]
 
     out += ["## 3. Basis mark Binance vs Bitget (biaya/risiko saat buka dan tutup)", "",
