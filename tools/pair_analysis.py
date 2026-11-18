@@ -105,6 +105,12 @@ def median(xs: list) -> Optional[float]:
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
 
+def top_share(xs: list, k: int) -> Optional[float]:
+    """Share of the total carried by the k largest values (None when the total is not positive)."""
+    tot = sum(xs)
+    return None if not xs or tot <= 0 else sum(sorted(xs, reverse=True)[:k]) / tot
+
+
 def pct(xs: list, q: float) -> Optional[float]:
     """Nearest-rank percentile (never below the q-th sample)."""
     if not xs:
@@ -215,7 +221,9 @@ def analyse(root: str, since_ns: Optional[int] = None, symbols: Optional[set] = 
     levels = tuple(fee_levels)
     res: dict = {"first_ns": None, "last_ns": None, "msgs": Counter(), "gaps": Counter(), "levels": levels,
                  "lat_ms": lat_ms, "min_usd": min_usd, "agg": {}, "basis": {}, "symbols": set(),
-                 "episodes": [] if keep_episodes else None, "feed_lag_ms": feed_lag_ms}
+                 "episodes": [] if keep_episodes else None, "feed_lag_ms": feed_lag_ms,
+                 "main_caps": [],             # main fee level: (sym, buy, feed, captures per latency) per episode
+                 "alt": {}}                   # main fee level, per symbol: consecutive episodes and direction changes
     feed = FeedLag()
     res["feedlag"] = feed
     quotes: dict = {}                                       # sym -> {venue: (bid, bq, ask, aq, conn)}
@@ -239,6 +247,13 @@ def analyse(root: str, since_ns: Optional[int] = None, symbols: Optional[set] = 
         a["usd"].append(ep.usd_open)
         a["opener"][ep.opener] += 1
         a["closer"][closer] += 1
+        if level == levels[0]:
+            res["main_caps"].append((sym, buy, ep.feed, tuple(ep.cap)))
+            al = res["alt"].setdefault(sym, {"pairs": 0, "switches": 0, "last": None})
+            if al["last"] is not None:
+                al["pairs"] += 1
+                al["switches"] += al["last"] != buy
+            al["last"] = buy
         for i, v in enumerate(ep.cap):
             if v is not None:
                 a["cap_usd"][i] += v
@@ -404,6 +419,29 @@ def report(res: dict, ref_latency_ms: float = 10) -> str:
             "ditutup oleh update Bitget, Bitget tertinggal: leg yang menghasilkan uang adalah order ke kutipan Bitget "
             "yang belum menyesuaikan, dan siapa yang lebih cepat ke Bitget yang menang.", ""]
 
+    out += [f"## 2b. Per koin (fee {main} bps, L = {lat[ref]:g} ms)", "",
+            "| Simbol | Episode/hari | Bergantian arah | $/hari (semua) | $/hari (feed normal) |", "|---|---|---|---|---|"]
+    per = {}
+    for sym, buy, a in rows:
+        p_ = per.setdefault(sym, [0, 0.0, 0.0])
+        p_[0] += a["n"]
+        p_[1] += a["cap_usd"][ref]
+        p_[2] += a["cap_usd_normal"][ref]
+    for sym, (n, usd, usd_n) in sorted(per.items(), key=lambda kv: -kv[1][2]):
+        al = res["alt"].get(sym, {"pairs": 0, "switches": 0})
+        out.append(f"| {sym} | {n / days:,.1f} | {_pc(al['switches'], al['pairs'])} | {usd / days:,.2f} | {usd_n / days:,.2f} |")
+    shares = [c[3][ref] for c in res["main_caps"] if c[2] == "normal" and c[3][ref] is not None]
+    ts = top_share(shares, 10)
+    out += ["",
+            f"Porsi 10 episode terbesar dari $/hari feed normal di L = {lat[ref]:g} ms: "
+            f"{'–' if ts is None else f'{100 * ts:.0f} %'} (dari {len(shares):,} episode). Porsi besar = angka per hari "
+            "bertumpu pada segelintir kejadian, bukan pola yang berulang.",
+            "",
+            "**Bergantian arah** = dari dua episode berurutan di koin yang sama, berapa persen arahnya berganti. Di perp, "
+            "posisi yang dibuka satu episode harus ditutup: bila arah sering berganti, penutupan bisa memakai episode "
+            "berikutnya (biaya ≈ satu fee level per episode); bila searah, penutupan saat harga sudah sama membayar fee "
+            "lagi (biaya satu putaran ≈ dua kali fee level: pakai level 22 untuk taker penuh).", ""]
+
     out += [f"## 3. Yang tersisa bila order tiba L ms setelah selisih muncul (fee {main} bps, semua simbol)", "",
             "| L (ms) | Episode masih terbuka | $/hari (sekali per episode, top-of-book) | Masih terbuka (feed normal) "
             "| $/hari (feed normal) |", "|---|---|---|---|---|"]
@@ -428,8 +466,9 @@ def report(res: dict, ref_latency_ms: float = 10) -> str:
         out.append(f"| {level} | {n / days:,.1f} | {_pc(sum(a['cap_n'][ref] for _, _, a in rs), n)} | "
                    f"{sum(a['cap_usd'][ref] for _, _, a in rs) / days:,.2f} | "
                    f"{sum(a['cap_usd_normal'][ref] for _, _, a in rs) / days:,.2f} |")
-    out += ["", "Fee 0 = selisih kotor (batas atas teoretis). Fee tier dasar taker 10 + 10 = 20; diskon (BNB/BGB, VIP, "
-            "maker) menurunkannya. Tier Anda belum diverifikasi.", ""]
+    out += ["", "Fee 0 = selisih kotor (batas atas teoretis). Tier dasar (dokumen resmi, dicek 2026-11-18): spot taker "
+            "10 + 10 = 20; perp taker Binance 5 + Bitget 6 = 11 per silang dan 22 per putaran buka + tutup, maker 2 + 2. "
+            "Diskon BNB/BGB dan VIP menurunkannya. Tier akun Anda belum diverifikasi.", ""]
 
     out += ["## 5. Basis: selisih mid Binance vs Bitget (sampel 1 per detik)", "",
             "| Simbol | p10 (bps) | p50 (bps) | p90 (bps) | Sampel |", "|---|---|---|---|---|"]
