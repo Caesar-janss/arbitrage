@@ -355,6 +355,42 @@ class PairAnalysisTest(unittest.TestCase):
         e = run(self.rec)["episodes"][0]
         self.assertEqual((e["buy"], e["sell"], e["opener"], e["closer"]), ("binance", "bitget", "bitget", "bitget"))
 
+    # ── per coin: dollars, alternation, concentration ────────────────────────────────────────────────────────────
+    def test_alternation_counts_direction_changes_between_consecutive_episodes(self):
+        self._spike(up_ms=1000, down_ms=1040)                                         # bitget -> binance
+        self.rec.add("bitget-0", 2000, bg("BTCUSDT", 100.60, 10, 100.62, 10))           # binance -> bitget
+        self.rec.add("bitget-0", 2010, bg("BTCUSDT", *BG_FLAT))
+        self._spike(up_ms=3000, down_ms=3040)                                         # bitget -> binance
+        self._spike(up_ms=4000, down_ms=4040)                                         # bitget -> binance again
+        alt = run(self.rec)["alt"]["BTCUSDT"]
+        self.assertEqual((alt["pairs"], alt["switches"]), (3, 2))
+
+    def test_alternation_is_counted_at_the_main_fee_level_only(self):
+        self._spike(bid=100.15)                                                       # 15 bps gross: only level 10
+        self.rec.add("bitget-0", 2000, bg("BTCUSDT", 100.60, 10, 100.62, 10))
+        self.rec.add("bitget-0", 2010, bg("BTCUSDT", *BG_FLAT))
+        alt = run(self.rec, fee_levels=(20, 10))["alt"]["BTCUSDT"]
+        self.assertEqual((alt["pairs"], alt["switches"]), (0, 0))
+
+    def test_top_share(self):
+        self.assertAlmostEqual(pa.top_share([5, 1, 1, 1, 1, 1], 1), 0.5)
+        self.assertAlmostEqual(pa.top_share([2, 2], 10), 1.0)
+        self.assertIsNone(pa.top_share([], 10))
+
+    def test_main_level_captures_are_kept_per_episode(self):
+        self._spike()
+        self._spike(up_ms=3000, down_ms=3040, bid=100.30)
+        caps = run(self.rec, fee_levels=(20, 10))["main_caps"]
+        self.assertEqual(len(caps), 2)                                                # level 20 only
+        self.assertAlmostEqual(sorted(c[3][0] for c in caps)[-1], 3.0, places=6)      # $ at the first latency
+
+    def test_report_has_the_per_coin_table_and_concentration(self):
+        self._feeds(990)
+        self._spike()
+        out = pa.report(run(self.rec))
+        for head in ("## 2b. Per koin", "Bergantian arah", "Porsi 10 episode terbesar"):
+            self.assertIn(head, out)
+
     # ── report ─────────────────────────────────────────────────────────────────────────────────────────────────────
     def test_report_and_cli_render(self):
         self._spike()
