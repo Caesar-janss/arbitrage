@@ -70,6 +70,11 @@ Prioritas: **T** = menentukan go/no-go, **S** = perlu sebelum uang sungguhan, **
 | G-25 | PR #12–#18 belum direviu ChatGPT (reviewer) | Keputusan go/no-go diambil dari kode yang hanya diperiksa builder | Paket reviu untuk ChatGPT: alat analisis dan perbaikan B-13 | Jansen (kirim) | R |
 | G-26 | Data spot lama (~25 GB) dan scanner: simpan atau hapus | Ruang disk | Putuskan setelah analisis perp selesai | Jansen | R |
 
+## 4b. Pembaruan
+
+- 2026-11-18: alat untuk **G-1** dan **G-3** dibangun (`tools/perp_study.py`, `docs/STAGE2_PERP_STUDY.md`); hasil menunggu
+  data ≥ 48 jam.
+
 ## 5. Urutan yang disarankan
 
 1. **Jansen, ±10 menit:** screenshot tier fee (G-20); `chronyc tracking` (G-6); cek tipe IP eksternal VM (G-19).
