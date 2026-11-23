@@ -54,6 +54,18 @@ hari. Fee dasar terverifikasi 2026-11-18 (`docs/GAP_REVIEW_2026-11-18.md` G-20).
 - Belum menghitung slippage saat buka/tutup, kebutuhan margin, atau risiko likuidasi pada leg yang merugi.
 - Hold "per tahun" diskalakan dari jam yang terukur: dengan beberapa hari data, angka ini sangat kasar.
 
+## 4b. Hasil 118 jam (2026-11-17 14:46Z → 11-22 12:59Z)
+
+- Settlement terdeteksi: Binance 239, Bitget 240. Interval 8 jam di kedua venue, WIF 4 jam.
+- **Semua koin net negatif** setelah fee 22 bps dalam 113 jam (hold: −7,3 sampai −27,6 bps). Terbaik OP: selisih
+  −1,04 bps/8 jam (long Binance / short Bitget) = 11,4 %/tahun bruto, balik modal 7,1 hari. BTC 3,4 %, LTC 4,7 %,
+  ETH 2,8 %, NEAR 3,0 %, APT 2,8 %; ADA, LINK, WIF, ARB bruto negatif (−1,6 sampai −4,3 %).
+- Strategi flip (tanpa melihat masa depan) lebih buruk: −38 sampai −170 bps. Sisi tetap terbaik dengan hindsight pun
+  tetap negatif untuk semua koin.
+- Basis mark p10–p90 ±5–20 bps (OP −8…+20, WIF −16…+8) sebanding dengan fee 22 bps: hasil funding bisa hilang di basis.
+- Pada notional $10.000 per leg, OP ≈ $1.100/tahun bruto bila selisih bertahan; biaya VM + disk ≈ $1.080/tahun.
+  Empat hari satu rezim, jadi sangat kasar.
+
 ## 5. Tes
 
 `tools/tests/test_funding_analysis.py` (17 tes; pesan nyata dari md-tokyo untuk parser, pola waktu pergantian nyata untuk

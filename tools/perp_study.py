@@ -68,28 +68,155 @@ def parse_trade(venue: str, payload: str) -> Optional[tuple]:
 
 median = pa.median
 pct = pa.pct
+DAY_NS = 86_400 * 1_000_000_000
+
+
+class _Sim:
+    """The position simulation at ONE order latency. Several run side by side over the same stream (review of the 96 h
+    run, 2026-11-23: L = 10 ms is optimistic from Tokyo, so the result must be shown at larger L too). They share the quote
+    store but nothing else: each has its own positions, pending orders and trades."""
+
+    def __init__(self, latency_ms: float, quotes: dict, feed_normal, entry_bps: float, close_bps: float,
+                 max_hold_s: float, max_usd: float, min_usd: float, fee_in: dict, fee_out: dict, normal_only: bool):
+        self.latency_ms, self.lat_ns = latency_ms, int(latency_ms * 1_000_000)
+        self.quotes, self.feed_normal = quotes, feed_normal
+        self.entry_bps, self.close_bps, self.max_hold_s = entry_bps, close_bps, max_hold_s
+        self.max_usd, self.min_usd, self.normal_only = max_usd, min_usd, normal_only
+        self.fee_in, self.fee_out = fee_in, fee_out
+        self.trades: list = []
+        self.missed: Counter = Counter()
+        self.pos: dict = {}                # sym -> open simulated position
+        self.pending: dict = {}            # sym -> (exec_ns, kind, arg)
+
+    def record(self, sym: str, p: dict, ns: int, exit_bps: float, reason: str) -> None:
+        fi, fo = self.fee_in, self.fee_out
+        net = p["entry"] + exit_bps - fi[p["long"]] - fi[p["short"]] - fo[p["long"]] - fo[p["short"]]
+        self.trades.append({"sym": sym, "long": p["long"], "short": p["short"], "open_ns": p["open"],
+                            "close_ns": ns, "entry_bps": p["entry"], "exit_bps": exit_bps, "net_bps": net,
+                            "notional": p["notional"], "usd": net / 1e4 * p["notional"], "reason": reason})
+
+    def exit_bps_now(self, sym: str, p: dict) -> Optional[float]:
+        q = self.quotes.get(sym, {})
+        ql, qs = q.get(p["long"]), q.get(p["short"])
+        return None if not (ql and qs) else (ql[0] / qs[2] - 1) * 1e4
+
+    def execute(self, sym: str, exec_ns: int) -> None:
+        _, kind, arg = self.pending.pop(sym)
+        q = self.quotes.get(sym, {})
+        if kind == "open":
+            buy, sell = arg
+            qb, qs = q.get(buy), q.get(sell)
+            gross = None if not (qb and qs) else (qs[0] / qb[2] - 1) * 1e4
+            if gross is None or gross < self.entry_bps:
+                self.missed[sym] += 1
+                return
+            coins = min(qb[3], qs[1], self.max_usd / qb[2])
+            self.pos[sym] = {"long": buy, "short": sell, "entry": gross, "open": exec_ns, "notional": coins * qb[2]}
+        else:
+            p = self.pos[sym]
+            x = self.exit_bps_now(sym, p)
+            if x is None or (arg == "converged" and x < -self.close_bps):
+                return                             # quotes unknown or the convergence reverted: keep the position
+            del self.pos[sym]
+            self.record(sym, p, exec_ns, x, arg)
+
+    def run_pending(self, ns: int) -> None:
+        for sym in [s for s, (t, _, _) in self.pending.items() if t <= ns]:
+            self.execute(sym, self.pending[sym][0])
+
+    def signal(self, sym: str, ns: int) -> None:
+        if sym in self.pending:
+            return
+        q = self.quotes.get(sym, {})
+        if sym in self.pos:
+            p = self.pos[sym]
+            x = self.exit_bps_now(sym, p)
+            if x is not None and x >= -self.close_bps:
+                self.pending[sym] = (ns + self.lat_ns, "close", "converged")
+            elif ns - p["open"] >= self.max_hold_s * 1e9:
+                self.pending[sym] = (ns + self.lat_ns, "close", "timeout")
+            return
+        for buy, sell in pa.DIRECTIONS:
+            qb, qs = q.get(buy), q.get(sell)
+            if not (qb and qs) or min(qb[3], qs[1]) * qb[2] < self.min_usd:
+                continue
+            if (qs[0] / qb[2] - 1) * 1e4 >= self.entry_bps and (not self.normal_only or self.feed_normal(ns)):
+                self.pending[sym] = (ns + self.lat_ns, "open", (buy, sell))
+                return
+
+    def finish(self, end: int) -> None:
+        self.run_pending(end)
+        for sym, (_, kind, _) in list(self.pending.items()):
+            if kind == "close" and sym in self.pos:
+                self.pending.pop(sym)
+        for sym, p in list(self.pos.items()):
+            x = self.exit_bps_now(sym, p)
+            if x is not None:
+                self.record(sym, p, end, x, "end")
+            del self.pos[sym]
+
+
+def concentration(trades: list) -> dict:
+    """How much of the total the few biggest positions and the top coin carry. The go criterion (gap review) is a top-10
+    share below 30 %. Losing positions stay in the total, so the share can exceed 100 % (shown as is, not clipped)."""
+    usd = [t["usd"] for t in trades]
+    total = sum(usd)
+    out = {"n": len(trades), "total": total, "top10_share": pa.top_share(usd, 10), "n_for_half": None,
+           "top_sym": None, "top_sym_share": None, "top3_share": None, "ex_top_usd": None}
+    if not trades or total <= 0:
+        return out
+    run = 0.0
+    for i, v in enumerate(sorted(usd, reverse=True), 1):
+        run += v
+        if run >= total / 2:
+            out["n_for_half"] = i
+            break
+    per: Counter = Counter()
+    for t in trades:
+        per[t["sym"]] += t["usd"]
+    ranked = sorted(per.items(), key=lambda kv: -kv[1])
+    out.update(top_sym=ranked[0][0], top_sym_share=ranked[0][1] / total,
+               top3_share=sum(v for _, v in ranked[:3]) / total, ex_top_usd=total - ranked[0][1])
+    return out
+
+
+def daily(trades: list, first_ns: Optional[int], last_ns: Optional[int]) -> list:
+    """Per UTC day (of the opening): positions, $, $ normalised to 24 h of data, top coin. Days with no positions are
+    listed too: a quiet day is information, and a result that lives on one day is not a pattern."""
+    if first_ns is None or last_ns is None:
+        return []
+    rows = []
+    for d in range(first_ns // DAY_NS, last_ns // DAY_NS + 1):
+        hours = (min(last_ns, (d + 1) * DAY_NS) - max(first_ns, d * DAY_NS)) / 3.6e12
+        ts = [t for t in trades if t["open_ns"] // DAY_NS == d]
+        usd = sum(t["usd"] for t in ts)
+        per: Counter = Counter()
+        for t in ts:
+            per[t["sym"]] += t["usd"]
+        rows.append({"day": time.strftime("%Y-%m-%d", time.gmtime(d * 86400)), "hours": hours, "n": len(ts), "usd": usd,
+                     "usd_per_day": usd * 24 / hours if hours > 0 else 0.0,
+                     "top_sym": max(per, key=per.get) if per else None})
+    return rows
 
 
 def analyse(root: str, since_ns: Optional[int] = None, symbols: Optional[set] = None, level_bps: float = 11.0,
             min_usd: float = 50.0, latency_ms: float = 10.0, entry_bps: float = 22.0, close_bps: float = 2.0,
             max_hold_s: float = 3600.0, max_usd: float = 1000.0, fee_bn: float = 5.0, fee_bg: float = 6.0,
             exit_fee_bn: Optional[float] = None, exit_fee_bg: Optional[float] = None, normal_only: bool = True,
-            feed_lag_ms: float = pa.DEFAULT_FEED_LAG_MS, progress=None) -> dict:
+            feed_lag_ms: float = pa.DEFAULT_FEED_LAG_MS, progress=None, extra_latency_ms: tuple = ()) -> dict:
     lat_ns = int(latency_ms * 1_000_000)
     fee_in = {"binance": fee_bn, "bitget": fee_bg}
     fee_out = {"binance": fee_bn if exit_fee_bn is None else exit_fee_bn,
                "bitget": fee_bg if exit_fee_bg is None else exit_fee_bg}
     res: dict = {"first_ns": None, "last_ns": None, "trade_msgs": Counter(), "comp": {}, "trades": [],
-                 "missed": Counter(), "params": dict(level_bps=level_bps, min_usd=min_usd, latency_ms=latency_ms,
-                 entry_bps=entry_bps, close_bps=close_bps, max_hold_s=max_hold_s, max_usd=max_usd, fee_in=fee_in,
-                 fee_out=fee_out, normal_only=normal_only, feed_lag_ms=feed_lag_ms)}
+                 "missed": Counter(), "sens": [], "params": dict(level_bps=level_bps, min_usd=min_usd,
+                 latency_ms=latency_ms, entry_bps=entry_bps, close_bps=close_bps, max_hold_s=max_hold_s,
+                 max_usd=max_usd, fee_in=fee_in, fee_out=fee_out, normal_only=normal_only, feed_lag_ms=feed_lag_ms)}
     feed = pa.FeedLag()
     quotes: dict = {}
     conn_syms: dict = {}
     eps: dict = {}                         # (sym, buy) -> open competition episode
     hist: dict = {}                        # (venue, sym, side) -> deque of (ns, price)
-    pos: dict = {}                         # sym -> open simulated position
-    pending: dict = {}                     # sym -> (exec_ns, kind, arg)
 
     def feed_normal(ns: int) -> bool:
         ex = [feed.excess_ms(v, ns) for v in pa.VENUES]
@@ -146,61 +273,10 @@ def analyse(root: str, since_ns: Optional[int] = None, symbols: Optional[set] = 
             if e["hit"] is None and (price >= e["price"] - tol if side == "buy" else price <= e["price"] + tol):
                 e["hit"] = ns
 
-    # ── simulation ────────────────────────────────────────────────────────────────────────────────────────────────
-    def record(sym: str, p: dict, ns: int, exit_bps: float, reason: str) -> None:
-        net = p["entry"] + exit_bps - fee_in[p["long"]] - fee_in[p["short"]] - fee_out[p["long"]] - fee_out[p["short"]]
-        res["trades"].append({"sym": sym, "long": p["long"], "short": p["short"], "open_ns": p["open"],
-                              "close_ns": ns, "entry_bps": p["entry"], "exit_bps": exit_bps, "net_bps": net,
-                              "notional": p["notional"], "usd": net / 1e4 * p["notional"], "reason": reason})
-
-    def exit_bps_now(sym: str, p: dict) -> Optional[float]:
-        q = quotes.get(sym, {})
-        ql, qs = q.get(p["long"]), q.get(p["short"])
-        return None if not (ql and qs) else (ql[0] / qs[2] - 1) * 1e4
-
-    def execute(sym: str, exec_ns: int) -> None:
-        _, kind, arg = pending.pop(sym)
-        q = quotes.get(sym, {})
-        if kind == "open":
-            buy, sell = arg
-            qb, qs = q.get(buy), q.get(sell)
-            gross = None if not (qb and qs) else (qs[0] / qb[2] - 1) * 1e4
-            if gross is None or gross < entry_bps:
-                res["missed"][sym] += 1
-                return
-            coins = min(qb[3], qs[1], max_usd / qb[2])
-            pos[sym] = {"long": buy, "short": sell, "entry": gross, "open": exec_ns, "notional": coins * qb[2]}
-        else:
-            p = pos[sym]
-            x = exit_bps_now(sym, p)
-            if x is None or (arg == "converged" and x < -close_bps):
-                return                             # quotes unknown or the convergence reverted: keep the position
-            del pos[sym]
-            record(sym, p, exec_ns, x, arg)
-
-    def run_pending(ns: int) -> None:
-        for sym in [s for s, (t, _, _) in pending.items() if t <= ns]:
-            execute(sym, pending[sym][0])
-
-    def signal(sym: str, ns: int) -> None:
-        if sym in pending:
-            return
-        q = quotes.get(sym, {})
-        if sym in pos:
-            p = pos[sym]
-            x = exit_bps_now(sym, p)
-            if x is not None and x >= -close_bps:
-                pending[sym] = (ns + lat_ns, "close", "converged")
-            elif ns - p["open"] >= max_hold_s * 1e9:
-                pending[sym] = (ns + lat_ns, "close", "timeout")
-            return
-        for buy, sell in pa.DIRECTIONS:
-            qb, qs = q.get(buy), q.get(sell)
-            if not (qb and qs) or min(qb[3], qs[1]) * qb[2] < min_usd:
-                continue
-            if (qs[0] / qb[2] - 1) * 1e4 >= entry_bps and (not normal_only or feed_normal(ns)):
-                pending[sym] = (ns + lat_ns, "open", (buy, sell))
-                return
+    # ── simulation: one _Sim per latency, the first is the main one ───────────────────────────────────────────────────
+    lats = [latency_ms] + [x for x in extra_latency_ms if x != latency_ms]
+    sims = [_Sim(x, quotes, feed_normal, entry_bps, close_bps, max_hold_s, max_usd, min_usd, fee_in, fee_out, normal_only)
+            for x in lats]
 
     # ── the stream ────────────────────────────────────────────────────────────────────────────────────────────────
     n = 0
@@ -208,7 +284,8 @@ def analyse(root: str, since_ns: Optional[int] = None, symbols: Optional[set] = 
         n += 1
         if progress and n % 5_000_000 == 0:
             progress(n, ns)
-        run_pending(ns)
+        for sm in sims:
+            sm.run_pending(ns)
         venue = conn.split("-")[0]
         if payload.startswith("#"):
             if '"ev":"disconnect"' in payload or '"ev":"stop"' in payload or '"ev":"start"' in payload:
@@ -256,19 +333,15 @@ def analyse(root: str, since_ns: Optional[int] = None, symbols: Optional[set] = 
         quotes.setdefault(sym, {})[venue] = (p[1], p[2], p[3], p[4], conn)
         conn_syms.setdefault(conn, set()).add(sym)
         episodes_update(sym, ns, venue)
-        signal(sym, ns)
+        for sm in sims:
+            sm.signal(sym, ns)
     end = res["last_ns"] or 0
-    run_pending(end)
-    for sym, (_, kind, _) in list(pending.items()):
-        if kind == "close" and sym in pos:
-            pending.pop(sym)
+    for sm in sims:
+        sm.finish(end)
     for key in list(eps):
         close_episode(key, end)
-    for sym, p in list(pos.items()):
-        x = exit_bps_now(sym, p)
-        if x is not None:
-            record(sym, p, end, x, "end")
-        del pos[sym]
+    res["trades"], res["missed"] = sims[0].trades, sims[0].missed
+    res["sens"] = [{"latency_ms": sm.latency_ms, "trades": sm.trades, "missed": sm.missed} for sm in sims]
     return res
 
 
@@ -340,7 +413,61 @@ def report(res: dict) -> str:
             "rate limit. Pesimistis: hanya level 1, satu posisi per koin. Belum termasuk funding selama posisi terbuka dan "
             "kebutuhan margin. Bandingkan dengan §2: bila kutipan basi biasanya sudah diambil sebelum L ms, simulasi ini "
             "terlalu optimistis.", ""]
+
+    # ── 3b-3e: is the number a pattern or a few events? (review 2026-11-23, go criteria in the gap review) ─────────────
+    out += ["## 3b. Rincian per hari (UTC, hari posisi dibuka)", "",
+            "| Hari | Jam data | Posisi | $ | $/hari (dinormalkan 24 jam) | Koin teratas |", "|---|---|---|---|---|---|"]
+    for r in daily(all_t, res["first_ns"], res["last_ns"]):
+        part = " (sebagian)" if r["hours"] < 20 else ""
+        out.append(f"| {r['day']}{part} | {r['hours']:.1f} | {r['n']:,} | {r['usd']:,.2f} | {r['usd_per_day']:,.2f} | "
+                   f"{r['top_sym'] or '–'} |")
+    out += ["", "Hasil yang hanya muncul pada satu atau dua hari bukan pola yang berulang. Hari sebagian dinormalkan ke 24 jam "
+            "(sampel kecil, kasar).", ""]
+
+    c = concentration(all_t)
+    out += ["## 3c. Konsentrasi (kriteria go: 10 posisi terbesar < 30 % dari total)", ""]
+    if not c["n"] or c["top10_share"] is None:
+        out += ["Tidak ada total positif untuk dibagi.", ""]
+    else:
+        out += [f"- Porsi 10 posisi terbesar: **{100 * c['top10_share']:.0f} %** dari total ${c['total']:,.2f} ({c['n']:,} posisi; "
+                "di atas 100 % bila posisi rugi menahan total).",
+                f"- Posisi yang dibutuhkan untuk separuh total: {c['n_for_half']:,} dari {c['n']:,}.",
+                f"- Koin teratas {c['top_sym']}: {100 * c['top_sym_share']:.0f} % dari total; tiga koin teratas "
+                f"{100 * c['top3_share']:.0f} %.",
+                f"- Tanpa {c['top_sym']}: ${c['ex_top_usd']:,.2f} total = ${c['ex_top_usd'] / days:,.2f}/hari.", ""]
+
+    sens = res.get("sens") or [{"latency_ms": P["latency_ms"], "trades": all_t, "missed": res["missed"]}]
+    out += ["## 3d. Sensitivitas latensi (satu putaran data; baris pertama = L utama)", "",
+            "Latensi order dari Tokyo belum terukur (G-4); jaringan saja ±7 ms per venue, jadi L = 10 ms optimistis.", "",
+            "| L (ms) | Posisi | Terlewat | $ total | $/hari | Porsi 10 terbesar |", "|---|---|---|---|---|---|"]
+    for s in sens:
+        ts = s["trades"]
+        usd = sum(t["usd"] for t in ts)
+        sh = concentration(ts)["top10_share"]
+        out.append(f"| {s['latency_ms']:g} | {len(ts):,} | {sum(s['missed'].values()):,} | {usd:,.2f} | {usd / days:,.2f} | "
+                   f"{'–' if sh is None else f'{100 * sh:.0f} %'} |")
+    out += [""]
+
+    out += ["## 3e. Posisi terbesar (L utama)", "",
+            "| Simbol | Dibuka (UTC) | Ukuran $ | Masuk (bps) | Keluar (bps) | Net (bps) | $ | Tahan (s) |",
+            "|---|---|---|---|---|---|---|---|"]
+    for t in sorted(all_t, key=lambda x: -x["usd"])[:10]:
+        out.append(f"| {t['sym']} | {md.utc(t['open_ns'])} | {t['notional']:,.0f} | {t['entry_bps']:.1f} | "
+                   f"{t['exit_bps']:.1f} | {t['net_bps']:.1f} | {t['usd']:,.2f} | {(t['close_ns'] - t['open_ns']) / 1e9:,.2f} |")
+    if not all_t:
+        out.append("| – | – | – | – | – | – | – | – |")
+    out += [""]
     return "\n".join(out) + "\n"
+
+
+def _ms_list(s: str) -> list:
+    try:
+        v = [float(x) for x in s.split(",") if x.strip()]
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a comma separated list of milliseconds: {s!r}")
+    if any(x <= 0 for x in v):
+        raise argparse.ArgumentTypeError("latencies must be > 0 ms")
+    return v
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -361,6 +488,8 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--exit-fee-bg", type=float, help="Bitget exit fee bps (default = taker; 2 = maker exit)")
     ap.add_argument("--all-feeds", action="store_true", help="also open while a feed is late or unknown")
     ap.add_argument("--feed-lag-ms", type=float, default=pa.DEFAULT_FEED_LAG_MS)
+    ap.add_argument("--also-latency-ms", type=_ms_list, default=[25.0, 50.0],
+                    help="more order latencies simulated in the same pass, comma separated (default 25,50)")
     a = ap.parse_args(argv)
     since = time.time_ns() - int(a.last_hours * 3600e9) if a.last_hours else None
     syms = {s.strip().upper() for s in a.symbols.split(",") if s.strip()} if a.symbols else None
@@ -369,7 +498,7 @@ def main(argv: Optional[list] = None) -> int:
 
     res = analyse(a.data, since, syms, a.level_bps, a.min_usd, a.latency_ms, a.entry_bps, a.close_bps, a.max_hold_s,
                   a.max_usd, a.fee_bn, a.fee_bg, a.exit_fee_bn, a.exit_fee_bg, not a.all_feeds, a.feed_lag_ms,
-                  progress=progress)
+                  progress=progress, extra_latency_ms=tuple(a.also_latency_ms))
     sys.stdout.write(report(res))
     return 0
 

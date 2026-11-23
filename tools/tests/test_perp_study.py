@@ -11,6 +11,7 @@ Fees: Binance taker 5, Bitget taker 6 bps (base tiers, verified 2026-11-18) unle
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -210,6 +211,173 @@ class SimulationTest(Base):
             self.assertIn("Tidak ada data", ps.report(ps.analyse(root)))
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+
+DAY_NS = 86_400 * 1_000_000_000
+
+
+def trade(sym: str, usd: float, open_ns: int, notional: float = 400.0) -> dict:
+    return {"sym": sym, "long": "bitget", "short": "binance", "open_ns": open_ns, "close_ns": open_ns + 1_000_000_000,
+            "entry_bps": 30.0, "exit_bps": 0.0, "net_bps": usd / notional * 1e4, "notional": notional, "usd": usd,
+            "reason": "converged"}
+
+
+class SensitivityTest(Base):
+    """Review of the 96 h run (2026-11-23): L = 10 ms is optimistic from Tokyo, so several L in ONE pass over the data."""
+
+    def _short_edge(self):
+        self.rec.add("binance-0", 1000, bn("BTCUSDT", 100.50, 10, 100.52, 10))          # edge opens
+        self.rec.add("binance-0", 1015, bn("BTCUSDT", *BN_FLAT))                        # and is gone 15 ms later
+        self.rec.add("binance-0", 2000, bn("BTCUSDT", *BN_FLAT))
+
+    def test_extra_latencies_run_in_one_pass_and_each_has_its_own_result(self):
+        self._short_edge()
+        r = self.run_(extra_latency_ms=(25.0,))
+        self.assertEqual([s["latency_ms"] for s in r["sens"]], [10.0, 25.0])
+        self.assertEqual((len(r["sens"][0]["trades"]), r["sens"][0]["missed"]["BTCUSDT"]), (1, 0))   # still there at +10
+        self.assertEqual((len(r["sens"][1]["trades"]), r["sens"][1]["missed"]["BTCUSDT"]), (0, 1))   # gone at +25
+
+    def test_the_main_result_is_the_first_latency(self):
+        self._short_edge()
+        r = self.run_(extra_latency_ms=(25.0, 50.0))
+        self.assertEqual(r["trades"], r["sens"][0]["trades"])
+        self.assertEqual(r["missed"], r["sens"][0]["missed"])
+
+    def test_extra_latencies_do_not_change_the_main_result(self):
+        self._short_edge()
+        alone = self.run_()
+        with_extra = self.run_(extra_latency_ms=(25.0, 50.0))
+        self.assertEqual(alone["trades"], with_extra["trades"])
+        self.assertEqual(alone["missed"], with_extra["missed"])
+        self.assertEqual(alone["comp"], with_extra["comp"])          # competition stays at the main L
+
+    def test_no_extra_latency_gives_a_single_sensitivity_row(self):
+        self._short_edge()
+        self.assertEqual(len(self.run_()["sens"]), 1)
+
+    def test_a_pending_order_executes_on_the_quotes_at_its_own_time_not_at_the_end(self):
+        self.rec.add("binance-0", 1000, bn("BTCUSDT", 100.50, 10, 100.52, 10))          # edge opens
+        self.rec.add("binance-0", 1040, bn("BTCUSDT", *BN_FLAT))                        # gone at +40, after both orders (+10, +25)
+        self.rec.add("binance-0", 2000, bn("BTCUSDT", *BN_FLAT))
+        r = self.run_(extra_latency_ms=(25.0,))
+        for s in r["sens"]:
+            self.assertEqual((len(s["trades"]), s["missed"]["BTCUSDT"]), (1, 0), s["latency_ms"])
+
+    def test_a_latency_equal_to_the_main_one_is_not_simulated_twice(self):
+        self._short_edge()
+        self.assertEqual([s["latency_ms"] for s in self.run_(extra_latency_ms=(10.0, 25.0, 25.0))["sens"]][:2], [10.0, 25.0])
+        self.assertEqual(len(self.run_(extra_latency_ms=(10.0,))["sens"]), 1)
+
+    def test_extra_simulations_also_mark_open_positions_at_the_end(self):
+        self.rec.add("binance-0", 1000, bn("BTCUSDT", 100.50, 10, 100.52, 10))
+        self.rec.add("binance-0", 1100, bn("BTCUSDT", 100.50, 10, 100.52, 10))          # edge never goes away
+        r = self.run_(extra_latency_ms=(25.0,))
+        self.assertEqual([[t["reason"] for t in s["trades"]] for s in r["sens"]], [["end"], ["end"]])
+        self.assertEqual(r["sens"][1]["trades"][0]["open_ns"] - tpa.BASE_NS, 1_025_000_000)   # opened at its own +L
+
+
+class ConcentrationTest(unittest.TestCase):
+    def test_top10_share_and_positions_for_half(self):
+        ts = [trade("A", 10.0, 0)] + [trade("B", 1.0, i) for i in range(1, 91)]              # total 100
+        c = ps.concentration(ts)
+        self.assertAlmostEqual(c["top10_share"], (10.0 + 9 * 1.0) / 100.0, places=9)
+        self.assertEqual(c["n_for_half"], 41)                                                  # 10 + 40 x 1 = 50
+        self.assertEqual(c["n"], 91)
+
+    def test_losing_positions_stay_in_the_total(self):
+        ts = ([trade("A", 8.0, 0), trade("A", 4.0, 1)] + [trade("A", 1.0, 2 + i) for i in range(10)]
+              + [trade("B", -2.0, 20 + i) for i in range(3)])                                  # total 8+4+10-6 = 16
+        c = ps.concentration(ts)
+        self.assertAlmostEqual(c["total"], 16.0, places=9)
+        self.assertAlmostEqual(c["top10_share"], (8.0 + 4.0 + 8 * 1.0) / 16.0, places=9)       # 125 %: losers offset, shown as is
+
+    def test_top_symbol_top3_and_the_total_without_the_top_symbol(self):
+        ts = ([trade("NEAR", 4.0, i) for i in range(6)] + [trade("WIF", 3.0, 10), trade("APT", 2.0, 11),
+              trade("ETH", 1.0, 12)])                                                          # total 30
+        c = ps.concentration(ts)
+        self.assertEqual(c["top_sym"], "NEAR")
+        self.assertAlmostEqual(c["top_sym_share"], 24.0 / 30.0, places=9)
+        self.assertAlmostEqual(c["top3_share"], 29.0 / 30.0, places=9)
+        self.assertAlmostEqual(c["ex_top_usd"], 6.0, places=9)
+
+    def test_empty_and_nonpositive_totals_do_not_crash(self):
+        self.assertIsNone(ps.concentration([])["top10_share"])
+        self.assertIsNone(ps.concentration([trade("A", -1.0, 0)])["top10_share"])
+
+
+class DailyTest(unittest.TestCase):
+    D0 = 20_043 * DAY_NS                          # a whole UTC day (2024-12-...: any day boundary will do)
+
+    def test_trades_are_grouped_by_utc_day_of_the_opening_and_normalised_to_24_hours(self):
+        first, last = self.D0 + 10 * 3600 * 10**9, self.D0 + DAY_NS + 12 * 3600 * 10**9          # 14 h + 12 h of data
+        ts = [trade("A", 2.0, self.D0 + 11 * 3600 * 10**9), trade("B", 1.0, self.D0 + 20 * 3600 * 10**9),
+              trade("A", 6.0, self.D0 + DAY_NS + 3600 * 10**9)]
+        rows = ps.daily(ts, first, last)
+        self.assertEqual([r["n"] for r in rows], [2, 1])
+        self.assertEqual([round(r["hours"], 6) for r in rows], [14.0, 12.0])
+        self.assertAlmostEqual(rows[0]["usd"], 3.0, places=9)
+        self.assertAlmostEqual(rows[0]["usd_per_day"], 3.0 * 24 / 14, places=9)
+        self.assertAlmostEqual(rows[1]["usd_per_day"], 6.0 * 24 / 12, places=9)
+        self.assertEqual(rows[0]["top_sym"], "A")
+
+    def test_the_day_is_the_day_of_the_opening_not_of_the_closing(self):
+        first, last = self.D0, self.D0 + 2 * DAY_NS - 1
+        t = trade("A", 1.0, self.D0 + DAY_NS - 500_000_000)                                      # opens 23:59:59.5, closes next day
+        self.assertEqual(t["close_ns"] // DAY_NS, self.D0 // DAY_NS + 1)
+        self.assertEqual([r["n"] for r in ps.daily([t], first, last)], [1, 0])
+
+    def test_a_day_without_trades_is_still_listed_so_quiet_days_are_visible(self):
+        first, last = self.D0, self.D0 + 3 * DAY_NS - 1
+        rows = ps.daily([trade("A", 5.0, self.D0 + 3600 * 10**9), trade("A", 5.0, self.D0 + 2 * DAY_NS + 5)], first, last)
+        self.assertEqual([r["n"] for r in rows], [1, 0, 1])
+        self.assertEqual(rows[1]["usd"], 0.0)
+        self.assertIsNone(rows[1]["top_sym"])
+
+    def test_no_data_no_rows(self):
+        self.assertEqual(ps.daily([], None, None), [])
+
+
+class ExtendedReportTest(Base):
+    def _trades(self):
+        self.rec.add("binance-0", 1000, bn("BTCUSDT", 100.50, 10, 100.52, 10))
+        self.rec.add("binance-0", 1500, bn("BTCUSDT", *BN_FLAT))
+        self.rec.add("binance-0", 2000, bn("BTCUSDT", *BN_FLAT))
+
+    def test_the_new_sections_are_in_the_report(self):
+        self._trades()
+        txt = ps.report(self.run_(extra_latency_ms=(25.0,)))
+        for s in ("## 3b. Rincian per hari", "2026-11-16", "## 3c. Konsentrasi", "10 posisi terbesar",
+                  "## 3d. Sensitivitas latensi", "| 25 |", "## 3e. Posisi terbesar"):
+            self.assertIn(s, txt)
+
+    def test_largest_positions_are_listed_largest_first_and_capped_at_ten(self):
+        self._trades()
+        res = self.run_()
+        res["trades"] = [trade("S%02d" % i, float(i), tpa.BASE_NS) for i in range(1, 13)]
+        res["sens"][0]["trades"] = res["trades"]
+        sec = ps.report(res).split("## 3e.")[1]
+        rows = [ln for ln in sec.splitlines() if re.match(r"\| S\d\d ", ln)]                    # not the "| Simbol |" header
+        self.assertEqual(len(rows), 10)
+        self.assertTrue(rows[0].startswith("| S12 ") and rows[-1].startswith("| S03 "), rows)
+
+    def test_the_report_survives_no_positions(self):
+        self.rec.add("binance-0", 1000, bn("BTCUSDT", 100.20, 10, 100.22, 10))
+        self.rec.add("binance-0", 2000, bn("BTCUSDT", *BN_FLAT))
+        txt = ps.report(self.run_(extra_latency_ms=(25.0, 50.0)))
+        self.assertIn("## 3d. Sensitivitas latensi", txt)
+        self.assertNotIn("Traceback", txt)
+
+    def test_cli_also_latency_ms(self):
+        self._trades()
+        root = self.rec.write()
+        out = subprocess.run([sys.executable, TOOL, "--data", root, "--all-feeds", "--close-bps", "5",
+                              "--also-latency-ms", "25,50"], capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("| 50 |", out.stdout)
+        for arg in ("x", "0", "25,-5"):
+            bad = subprocess.run([sys.executable, TOOL, "--data", root, "--also-latency-ms", arg], capture_output=True,
+                                 text=True, timeout=60)
+            self.assertNotEqual(bad.returncode, 0, arg)
 
 
 if __name__ == "__main__":

@@ -93,5 +93,23 @@ sebelum pesaing, kegagalan order, dan inventori searah; VM ≈ $2,6/hari). Fee l
 
 ## 5. Tes
 
-`tools/tests/test_pair_analysis.py` (31 tes, rekaman sintetis dalam format recorder). Mutation check: 10/10 mutan
-(PR #13) + 10/10 (PR #14) tertangkap (lihat `docs/review/stage2/REGRESSION_LOG.md`).
+`tools/tests/test_pair_analysis.py` (50 tes, rekaman sintetis dalam format recorder). Mutation check: 10/10 mutan
+(PR #13) + 10/10 (PR #14) + 14/14 (§2c, tinjauan 96 jam) tertangkap (lihat `docs/review/stage2/REGRESSION_LOG.md`).
+
+## 3d. Perp, 96,2 jam (2026-11-18 11:45Z → 11-22 11:59Z), fee utama 22, L = 10 ms
+
+- Pesan: Binance bookTicker 836,7 juta, Bitget books1 69,8 juta. Putus: binance-0 9×, binance-m0 2×, bitget-0 27×, bitget-1 13×.
+- Feed Binance perp: kelebihan lag p50 1 ms, **p99 5 ms** (maks 13,7 s). Pada 19 jam pertama p99 266 ms; jadi lonjakan G-5
+  khusus periode itu, bukan sifat feed. Feed Bitget: kelebihan p50 12 ms, p99 228 ms.
+- 76–100 % episode dibuka saat feed telat (ETH 93 %, BTC 98–99 %).
+- $/hari sekali per episode, semua simbol: $3.072 semua episode, **$522 feed normal** (L = 10); L = 25: $365; 50: $257;
+  100: $195; 250: $43. Fee 15: $860; 11: $1.185; 8: $1.769 (feed normal).
+- Per koin (feed normal): ETH $461,61, NEAR $21,73, OP $10,24; porsi 10 episode terbesar 66 % dari 420 episode.
+  Satu kali silang bukan penutupan posisi: bandingkan dengan simulasi di `docs/STAGE2_PERP_STUDY.md` ($13,49/hari).
+- Basis mid Binance − Bitget: p10–p90 antara −7,6 dan +14 bps; sebagian besar koin −2…+7 bps, OP +2…+14, WIF −7,6…0.
+
+## 2c. Episode terbesar (tinjauan 2026-11-23)
+
+Daftar 10 episode terbesar (level fee utama, feed normal, L referensi) dengan waktu buka, durasi, net saat buka dan net
+maksimum, ukuran dan $ pada L. Dibuat untuk memeriksa apakah angka $/hari per koin (mis. ETH $461) bertumpu pada
+beberapa kejadian besar; ditambah kalimat porsi episode terbesar tunggal.

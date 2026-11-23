@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import heapq
+import itertools
 import json
 import os
 import re
@@ -45,6 +46,7 @@ VENUES = ("binance", "bitget")
 DIRECTIONS = (("bitget", "binance"), ("binance", "bitget"))     # (buy at, sell at)
 DEFAULT_LEVELS = (20, 15, 10, 0)
 DEFAULT_LAT_MS = (1, 5, 10, 25, 50, 100, 250)
+TOP_EPISODES = 15                    # largest main-level normal-feed episodes kept per latency (res["top_eps"])
 BASIS_EVERY_NS = 1_000_000_000
 EPS = 1e-9
 
@@ -224,6 +226,8 @@ def analyse(root: str, since_ns: Optional[int] = None, symbols: Optional[set] = 
                  "episodes": [] if keep_episodes else None, "feed_lag_ms": feed_lag_ms,
                  "main_caps": [],             # main fee level: (sym, buy, feed, captures per latency) per episode
                  "alt": {}}                   # main fee level, per symbol: consecutive episodes and direction changes
+    top_heaps: list = [[] for _ in lat_ms]                  # per latency: min-heap of (capture $, seq, details), size <= TOP_EPISODES
+    seq = itertools.count()
     feed = FeedLag()
     res["feedlag"] = feed
     quotes: dict = {}                                       # sym -> {venue: (bid, bq, ask, aq, conn)}
@@ -249,6 +253,17 @@ def analyse(root: str, since_ns: Optional[int] = None, symbols: Optional[set] = 
         a["closer"][closer] += 1
         if level == levels[0]:
             res["main_caps"].append((sym, buy, ep.feed, tuple(ep.cap)))
+            if ep.feed == "normal":
+                for i, v in enumerate(ep.cap):
+                    h = top_heaps[i]
+                    if v is not None and (len(h) < TOP_EPISODES or v > h[0][0]):
+                        item = (v, next(seq), {"sym": sym, "buy": buy, "sell": sell, "open_ns": ep.open_ns, "dur_ms": dur,
+                                               "net_open": ep.net_open, "net_max": ep.net_max, "usd_open": ep.usd_open,
+                                               "feed": ep.feed, "capture": dict(zip(lat_ms, ep.cap))})
+                        if len(h) < TOP_EPISODES:
+                            heapq.heappush(h, item)
+                        else:
+                            heapq.heapreplace(h, item)
             al = res["alt"].setdefault(sym, {"pairs": 0, "switches": 0, "last": None})
             if al["last"] is not None:
                 al["pairs"] += 1
@@ -355,6 +370,7 @@ def analyse(root: str, since_ns: Optional[int] = None, symbols: Optional[set] = 
     end_ns = res["last_ns"] or 0
     for key, ep in sorted(open_eps.items(), key=lambda kv: kv[1].open_ns):
         finish(key, ep, end_ns, "end")
+    res["top_eps"] = [[d for _, _, d in sorted(h, key=lambda x: (-x[0], x[1]))] for h in top_heaps]
     return res
 
 
@@ -441,6 +457,25 @@ def report(res: dict, ref_latency_ms: float = 10) -> str:
             "posisi yang dibuka satu episode harus ditutup: bila arah sering berganti, penutupan bisa memakai episode "
             "berikutnya (biaya ≈ satu fee level per episode); bila searah, penutupan saat harga sudah sama membayar fee "
             "lagi (biaya satu putaran ≈ dua kali fee level: pakai level 22 untuk taker penuh).", ""]
+
+    # 2c: which episodes carry the per-day number? (review 2026-11-23: ETH $461/day vs 3 simulated positions)
+    tops = (res.get("top_eps") or [[] for _ in lat])[ref]
+    out += [f"## 2c. Episode terbesar (fee {main} bps, hanya feed normal, L = {lat[ref]:g} ms; maksimum {TOP_EPISODES})", "",
+            "| Simbol | Beli → jual | Dibuka (UTC) | Durasi (ms) | Net saat buka (bps) | Net maks (bps) | Ukuran dibuka ($) "
+            "| $ di L |", "|---|---|---|---|---|---|---|---|"]
+    for e in tops[:10]:
+        out.append(f"| {e['sym']} | {e['buy']}→{e['sell']} | {md.utc(e['open_ns'])} | {_f(e['dur_ms'])} | "
+                   f"{e['net_open']:.1f} | {e['net_max']:.1f} | {e['usd_open']:,.0f} | {e['capture'][lat[ref]]:,.2f} |")
+    if not tops:
+        out.append("| (tidak ada episode feed normal) | | | | | | | |")
+    tot_normal = sum(shares)
+    if tops and tot_normal > 0:
+        out += ["", f"Episode terbesar tunggal = ${tops[0]['capture'][lat[ref]]:,.2f} "
+                f"({100 * tops[0]['capture'][lat[ref]] / tot_normal:.0f} % dari total $ feed normal di L ini). "
+                "Bila beberapa baris teratas menjelaskan sebagian besar total, angka $/hari per koin di §2b adalah "
+                "kejadian langka (mis. lonjakan besar), bukan pola harian.", ""]
+    else:
+        out.append("")
 
     out += [f"## 3. Yang tersisa bila order tiba L ms setelah selisih muncul (fee {main} bps, semua simbol)", "",
             "| L (ms) | Episode masih terbuka | $/hari (sekali per episode, top-of-book) | Masih terbuka (feed normal) "
