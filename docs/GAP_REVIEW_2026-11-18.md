@@ -4,8 +4,10 @@ Diminta Jansen: "cek secara keseluruhan di mana celah yang belum kita cek". Doku
 belum diverifikasi, atau belum dibangun**, kenapa penting, cara mengeceknya, siapa yang bisa, dan prioritasnya. Sumber:
 semua laporan Tahap 2, audit 2026-11-12, dan log temuan.
 
-**Di mana kita berdiri:** spot Binance ↔ Bitget taker-taker = no-go (5,8 hari, ≈ $11/hari batas atas). Perp: 19 jam data,
-belum layak dan belum gugur. Funding: 24 jam, selisih antar-venue ≤ 0,64 bps/8 jam (≈ 4–7 %/tahun bruto, kondisi pasar tenang).
+**Di mana kita berdiri (diperbarui 2026-11-23):** spot Binance ↔ Bitget taker-taker = no-go (5,8 hari, ≈ $11/hari batas
+atas). Perp spatial: 96 jam, simulasi yang membayar penutupan memberi $13,49/hari (optimistis, 192 posisi, NEAR 44 %),
+bukti pesaing lemah (23 % vs baseline 18 %); belum lolos kriteria durasi (≥ 7 hari) dan konsentrasi; belum gugur.
+Funding: 118 jam, semua koin net negatif setelah fee 22 bps (terbaik OP 11,4 %/tahun bruto).
 
 Prioritas: **T** = menentukan go/no-go, **S** = perlu sebelum uang sungguhan, **R** = perbaikan.
 
@@ -28,12 +30,12 @@ Prioritas: **T** = menentukan go/no-go, **S** = perlu sebelum uang sungguhan, **
 
 | # | Celah | Kenapa penting | Cara cek | Siapa | Prio |
 |---|---|---|---|---|---|
-| G-1 | Biaya menutup posisi perp belum dimodelkan per posisi; laporan masih "sekali silang − fee" | Satu putaran penuh taker = 22 bps, bukan 11; bisa menghapus semua angka $/hari | Simulasi posisi di rekaman: buka di episode, tutup di episode arah sebaliknya atau saat batas waktu di harga pasar, hitung untung/rugi termasuk perubahan basis. Kolom "bergantian arah" (PR #18) memberi petunjuk pertama | builder | T |
+| G-1 | **Dijawab sebagian 2026-11-23 (§4b).** Biaya menutup posisi perp belum dimodelkan per posisi; laporan masih "sekali silang − fee" | Satu putaran penuh taker = 22 bps, bukan 11; bisa menghapus semua angka $/hari | Simulasi posisi di rekaman: buka di episode, tutup di episode arah sebaliknya atau saat batas waktu di harga pasar, hitung untung/rugi termasuk perubahan basis. Kolom "bergantian arah" (PR #18) memberi petunjuk pertama | builder | T |
 | G-2 | Depth di bawah level 1 tidak dipakai (depth20 dan books15 sudah direkam) | Kapasitas per peluang dan slippage untuk ukuran > top-of-book | Hitung ukuran yang bisa diisi sampai net = 0 per episode | builder | R |
-| G-3 | **Bukti pesaing** belum dicek | "Tersisa pada L ms" mengandaikan tak ada yang mengambil lebih dulu | Pasif, dari data yang sudah ada: apakah ada trade tercetak di harga basi venue tertinggal selama episode? Bila hampir selalu ada, peluang sudah diambil orang lain | builder | T |
+| G-3 | **Dijawab sebagian 2026-11-23 (§4b).** **Bukti pesaing** belum dicek | "Tersisa pada L ms" mengandaikan tak ada yang mengambil lebih dulu | Pasif, dari data yang sudah ada: apakah ada trade tercetak di harga basi venue tertinggal selama episode? Bila hampir selalu ada, peluang sudah diambil orang lain | builder | T |
 | G-4 | Latensi **order** (kirim → ack → isi) belum pernah diukur; S0 hanya mengukur data pasar | Jendela 5–20 ms tidak berarti apa-apa bila order ke Bitget butuh 30–100 ms | Butuh API key + order kecil (atau testnet, yang latensinya tidak representatif) → jalur TEAM_WORKFLOW §6 | Jansen + builder | T |
-| G-5 | Lonjakan keterlambatan feed Binance perp: kelebihan p99 266 ms (spot 4 ms) | Episode saat Binance telat bisa semu; penyebab belum jelas (sumber stempel `aggTrade`/`bookTicker` vs antrean nyata) | Pecah keterlambatan per jenis stream dan per jam; bandingkan dengan beban | builder | R |
-| G-6 | Sinkronisasi jam VM belum dicek | Durasi aman (satu jam), tetapi kelebihan lag mengandaikan offset jam stabil | `chronyc tracking` di VM (1 perintah) | Jansen | R |
+| G-5 | Lonjakan keterlambatan feed Binance perp: kelebihan p99 266 ms (spot 4 ms); **pada 96 jam p99 5 ms, jadi khusus 19 jam pertama** | Episode saat Binance telat bisa semu; penyebab belum jelas (sumber stempel `aggTrade`/`bookTicker` vs antrean nyata) | Pecah keterlambatan per jenis stream dan per jam; bandingkan dengan beban | builder | R |
+| G-6 | **Selesai 2026-11-19: chrony md-tokyo 3,45 µs lambat dari NTP, RMS 6,7 µs, stratum 3.** Sinkronisasi jam VM belum dicek | Durasi aman (satu jam), tetapi kelebihan lag mengandaikan offset jam stabil | `chronyc tracking` di VM (1 perintah) | Jansen | R |
 | G-7 | Makna `ts` Bitget `books1` (waktu snapshot vs waktu kejadian) belum diverifikasi | Ukuran "feed telat" Bitget bergantung padanya | Dokumen Bitget + bandingkan `ts` dengan trade yang mengubah book | builder | R |
 | G-8 | Ukuran sampel: perp 19 jam, funding 2 settlement | Sampel 6 jam spot dulu meleset sampai 23× | Biarkan rekaman berjalan; analisis ulang ≥ 21–22 Nov, keputusan ≥ 7 hari | waktu | T |
 | G-9 | Hanya 15 koin pilihan tangan; perp lain tidak pernah dipindai | Peluang (dan funding ekstrem) sering di perp yang lebih liar | Scanner REST untuk semua perp USDT di kedua venue: selisih mid dan funding | builder | R |
@@ -56,7 +58,7 @@ Prioritas: **T** = menentukan go/no-go, **S** = perlu sebelum uang sungguhan, **
 | # | Celah | Kenapa penting | Cara cek | Siapa | Prio |
 |---|---|---|---|---|---|
 | G-18 | Legalitas dan akses Binance/Bitget (dan API dari server Tokyo) untuk penduduk Indonesia; pajak kripto | Bisa membatalkan venue atau menambah biaya per transaksi | Riset sumber resmi (OJK, ketentuan exchange); bukan nasihat hukum | Jansen (builder bisa riset awal) | S |
-| G-19 | Keamanan API: sub-account, key trade-only, withdraw OFF, whitelist IP; IP eksternal VM kemungkinan *ephemeral* | Whitelist rusak setelah VM berhenti/menyala; key tanpa whitelist berisiko | Console GCP: cek tipe IP, reservasi IP statis (biaya kecil) sebelum membuat key | Jansen | S |
+| G-19 | Keamanan API: sub-account, key trade-only, withdraw OFF, whitelist IP; IP eksternal VM **terkonfirmasi Ephemeral (35.243.90.225, 2026-11-19)**, reservasi IP statis belum dilakukan | Whitelist rusak setelah VM berhenti/menyala; key tanpa whitelist berisiko | Console GCP: cek tipe IP, reservasi IP statis (biaya kecil) sebelum membuat key | Jansen | S |
 | G-20 | **Tier fee akun** (spot, futures, maker/taker, diskon BNB/BGB) | Variabel terbesar di semua tabel. Dasar terverifikasi 2026-11-18: Binance USDⓈ-M maker 0,02 % / taker 0,05 % (BNB −10 %); Bitget futures maker 0,02 % / taker 0,06 %; Bitget spot 0,1 % (BGB 0,08 %) | Screenshot halaman fee akun | Jansen | T |
 | G-21 | Anggaran: credit GCP ≈ US$300 sampai 10 Feb 2027; md-tokyo ≈ US$75–80 + disk ≈ US$10–12 + reuztiz ≈ US$40 per bulan | Credit habis kira-kira akhir Januari; pengingat billing mingguan belum dibuat ulang | Keputusan: pengingat ulang; batas waktu Tahap 2 | Jansen | R |
 
@@ -74,6 +76,25 @@ Prioritas: **T** = menentukan go/no-go, **S** = perlu sebelum uang sungguhan, **
 
 - 2026-11-18: alat untuk **G-1** dan **G-3** dibangun (`tools/perp_study.py`, `docs/STAGE2_PERP_STUDY.md`); hasil menunggu
   data ≥ 48 jam.
+- 2026-11-19: **G-6 selesai** (chrony md-tokyo 3,45 µs, RMS 6,7 µs). **G-19**: IP eksternal md-tokyo Ephemeral. Akun
+  Jansen bukan VIP; screenshot tier fee belum dikirim (G-20 terbuka). Pratinjau 36,9 jam: 14 posisi, $3,48/hari.
+- 2026-11-22/23: run 96 jam (`perp_study`, `pair_analysis`, `funding_analysis`; rincian di `docs/STAGE2_PERP_STUDY.md`,
+  `docs/STAGE2_PAIR_ANALYSIS.md` §3d, `docs/STAGE2_FUNDING.md` §4b).
+
+### Penilaian terhadap kriteria go perp (2026-11-23, keputusan tetap pada Jansen)
+
+| Kriteria | Hasil 96 jam | Status |
+|---|---|---|
+| Net simulasi ≥ ±$8/hari (3× biaya infrastruktur) | $13,49/hari, optimistis | lolos nominal |
+| Hanya feed normal, L ≥ 10 ms | ya, L = 10 ms | lolos; L = 10 ms optimistis dari Tokyo (G-4 belum terukur) |
+| Bukti pesaing rendah | 23 % vs baseline 18 %; ≤ 10 ms hanya 5 % | lolos, lemah (pratinjau 36 jam sempat 39 %) |
+| ≥ 7 hari, bukan satu rezim | 4 hari | **belum** |
+| 10 posisi terbesar < 30 % | tidak dilaporkan; per koin NEAR 44 %, tiga koin 70 % | **belum dinilai** (PR ini menambah laporan) |
+
+Langkah A (disepakati 2026-11-23): tambah rincian per hari, porsi 10 posisi terbesar, sensitivitas L = 10/25/50 ms, dan
+daftar episode terbesar (menjelaskan selisih ETH $461/hari di `pair_analysis` vs 3 posisi di simulasi); jalankan ulang
+pada data 7 hari (≥ 24–25 Nov). Setelah itu: B (ukur latensi dan isi order nyata, G-4, butuh riset legal G-18) atau C
+(tutup perp spatial seperti spot).
 
 ## 5. Urutan yang disarankan
 

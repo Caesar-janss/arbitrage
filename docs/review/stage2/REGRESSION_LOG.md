@@ -135,3 +135,23 @@ relatif vs epoch → kini nanodetik integer; tes CLI memakai `--close-bps` defau
 mengharapkan kata "converged" padahal kolom berisi jumlah). Mutation 14/15 di putaran pertama: jendela baseline 10× lebih
 lebar lolos (tes hanya punya satu trade di dalam dan satu di luar) → `test_a_trade_just_outside_the_equal_window_is_not_baseline`
 → 15/15 (`python3 -B`).
+
+## Tinjauan 96 jam: sensitivitas latensi, konsentrasi, per hari, episode terbesar (basis `df60d9e`)
+
+Tes ditulis dulu. `perp_study`: 14 tes baru, 13 error dan 1 gagal terhadap basis (fungsi/parameter belum ada). Setelah
+implementasi: 3 gagal hanya di tes laporan (bagian baru) → hijau setelah bagian laporan ditulis. Kesalahan builder di
+tes sendiri: (1) rumus porsi 10 terbesar untuk 3 posisi (selalu 100 %), diganti 15 posisi; (2) filter baris `"| S"` ikut
+menangkap judul `| Simbol |`, diganti pola dua digit. `pair_analysis`: 7 tes baru, 5 error dan 2 gagal terhadap basis;
+dua tes laporan memakai `"\\n## 3."` (garis miring + n literal) sehingga potongan bagian ikut memuat tabel lain, diperbaiki.
+
+Mutation (`python3 -B`, `__pycache__` dibersihkan tiap mutan):
+
+- `perp_study` 17/17 setelah menambah 3 tes untuk mutan yang selamat di putaran pertama (14/17): order tertunda di
+  simulasi tambahan tidak dieksekusi pada waktunya (eksekusi hanya di akhir data, hasilnya sama pada tes pertama),
+  latensi sama dengan L utama dihitung dua kali, urutan "posisi terbesar" terbalik. Dua mutan terakhir sempat "mati"
+  karena tes yang gagal pada kode asli; dijalankan ulang setelah tes diperbaiki.
+- `pair_analysis` 14/14 (feed unknown/late ikut daftar, simpan terkecil, 16 bukan 15, urutan naik, capture None ikut,
+  net saat buka = state terakhir, net maks = net buka, durasi 0, waktu buka = waktu tutup, L referensi diabaikan, 5 baris,
+  total pembagi salah, heap tanpa batas).
+
+Suite penuh 194 tes hijau.
