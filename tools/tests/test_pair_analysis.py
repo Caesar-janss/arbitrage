@@ -409,5 +409,135 @@ class PairAnalysisTest(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
 
+class TopEpisodesTest(unittest.TestCase):
+    """Review of the 96 h run (2026-11-23): ETH showed $461/day of 'normal feed' capture while a position simulation found
+    3 positions in 4 days. A few giant episodes can carry a per-day number, so the largest ones are listed, not only counted.
+    Bitget ask 100.00 ($1,000 deep); a Binance bid of 100.50 is gross 50 bps = net 30 bps at fee 20 = $3.00 at 10 ms."""
+
+    def setUp(self):
+        self.rec = Rec()
+        self.rec.add("binance-0", 0, bn("BTCUSDT", *BN_FLAT))
+        self.rec.add("bitget-0", 1, bg("BTCUSDT", *BG_FLAT))
+
+    def tearDown(self):
+        self.rec.close()
+
+    def _feeds(self, until_ms: float, step: float = 100, lag: float = 5):
+        t = 0.0
+        while t <= until_ms:
+            self.rec.add("binance-0", t, bnt("BTCUSDT", server_ms(t, lag)))
+            self.rec.add("bitget-0", t + 1, bg("BTCUSDT", *BG_FLAT, ts=server_ms(t + 1, lag)))
+            t += step
+
+    def _spike(self, up_ms: float, bid: float):
+        self.rec.add("binance-0", up_ms, bn("BTCUSDT", bid, 10, round(bid + 0.02, 2), 10))
+        self.rec.add("binance-0", up_ms + 40, bn("BTCUSDT", *BN_FLAT))
+
+    def test_the_largest_normal_feed_episodes_are_kept_largest_first_with_their_details(self):
+        self._feeds(5000)
+        self._spike(1000, 100.50)
+        self._spike(2000, 100.80)
+        self._spike(3000, 100.65)
+        res = run(self.rec, fee_levels=(20,))
+        self.assertEqual(len(res["top_eps"]), 3)                              # one list per latency (10, 30, 50)
+        top = res["top_eps"][0]
+        self.assertEqual([round(e["capture"][10], 2) for e in top], [6.0, 4.5, 3.0])
+        e = top[0]
+        self.assertEqual((e["sym"], e["buy"], e["feed"]), ("BTCUSDT", "bitget", "normal"))
+        self.assertAlmostEqual(e["net_open"], 60.0, places=6)
+        self.assertAlmostEqual(e["usd_open"], 1000.0, places=6)
+        self.assertAlmostEqual(e["dur_ms"], 40.0, places=3)
+        self.assertEqual(e["open_ns"] - BASE_NS, 2_000_000_000)
+
+    def test_late_and_unknown_episodes_are_not_listed(self):
+        self._feeds(900)
+        self.rec.add("bitget-0", 995, bg("BTCUSDT", *BG_FLAT, ts=server_ms(995, 65)))
+        self._spike(1000, 100.50)                                              # late
+        self._spike(3000, 100.50)                                              # stale lag sample: unknown
+        res = run(self.rec, fee_levels=(20,), feed_lag_ms=20)
+        self.assertEqual(res["top_eps"][0], [])
+
+    def test_only_the_main_fee_level_is_listed(self):
+        self._feeds(2000)
+        self._spike(1000, 100.50)
+        res = run(self.rec, fee_levels=(20, 10))
+        self.assertEqual(len(res["top_eps"][0]), 1)
+        self.assertAlmostEqual(res["top_eps"][0][0]["capture"][10], 3.0, places=6)    # level 20, not level 10 ($4.00)
+
+    def test_a_latency_with_no_capture_lists_nothing_for_that_episode(self):
+        self._feeds(2000)
+        self._spike(1000, 100.50)                                              # lasts 40 ms
+        res = run(self.rec, fee_levels=(20,), latencies_ms=(10, 50))
+        self.assertEqual((len(res["top_eps"][0]), len(res["top_eps"][1])), (1, 0))    # gone at +50
+
+    def test_at_most_fifteen_are_kept_the_largest_ones(self):
+        self._feeds(21500)
+        for i in range(20):
+            self._spike(1000 + 1000 * i, round(100.30 + 0.01 * i, 2))          # net 10 .. 29 bps
+        top = run(self.rec, fee_levels=(20,))["top_eps"][0]
+        self.assertEqual(len(top), 15)
+        self.assertAlmostEqual(top[0]["net_open"], 29.0, places=4)
+        self.assertAlmostEqual(top[-1]["net_open"], 15.0, places=4)
+        self.assertEqual([e["net_open"] for e in top], sorted((e["net_open"] for e in top), reverse=True))
+
+    def test_report_lists_the_largest_episodes_largest_first(self):
+        self._feeds(5000)
+        self._spike(1000, 100.50)
+        self._spike(2000, 100.80)
+        out = pa.report(run(self.rec, fee_levels=(20,)))
+        self.assertIn("## 2c. Episode terbesar", out)
+        sec = out.split("## 2c.")[1].split("\n## 3.")[0]
+        for head in ("Net saat buka", "Dibuka (UTC)", "$ di L"):
+            self.assertIn(head, sec)
+        rows = [ln for ln in sec.splitlines() if ln.startswith("| BTCUSDT |")]
+        self.assertEqual(len(rows), 2)
+        self.assertIn("60.0", rows[0])
+        self.assertIn("30.0", rows[1])
+
+    def test_details_use_the_opening_state_and_the_maximum_not_the_last_state(self):
+        self._feeds(3000)
+        self.rec.add("binance-0", 1000, bn("BTCUSDT", 100.50, 10, 100.52, 10))     # net 30 at the opening
+        self.rec.add("binance-0", 1010, bn("BTCUSDT", 100.70, 10, 100.72, 10))     # grows to net 50
+        self.rec.add("binance-0", 1020, bn("BTCUSDT", 100.60, 10, 100.62, 10))     # last state net 40
+        self.rec.add("binance-0", 1040, bn("BTCUSDT", *BN_FLAT))
+        e = run(self.rec, fee_levels=(20,))["top_eps"][0][0]
+        self.assertAlmostEqual(e["net_open"], 30.0, places=6)
+        self.assertAlmostEqual(e["net_max"], 50.0, places=6)
+        self.assertAlmostEqual(e["capture"][10], 3.0, places=6)                    # what an order at +10 ms meets: the opening state
+
+    def test_report_shows_at_most_ten_rows(self):
+        self._feeds(13500)
+        for i in range(12):
+            self._spike(1000 + 1000 * i, round(100.30 + 0.01 * i, 2))
+        sec = pa.report(run(self.rec, fee_levels=(20,))).split("## 2c.")[1].split("\n## 3.")[0]
+        self.assertEqual(len([ln for ln in sec.splitlines() if ln.startswith("| BTCUSDT |")]), 10)
+
+    def test_report_gives_the_share_of_the_single_largest_episode(self):
+        self._feeds(5000)
+        self._spike(1000, 100.50)                                                  # $3.00
+        self._spike(2000, 100.80)                                                  # $6.00 -> 6 / 9
+        sec = pa.report(run(self.rec, fee_levels=(20,))).split("## 2c.")[1]
+        self.assertIn("$6.00", sec)
+        self.assertIn("67 %", sec)
+
+    def test_report_uses_the_reference_latency(self):
+        self._feeds(5000)
+        self._spike(1000, 100.50)                                                  # 40 ms: still there at +30
+        self.rec.add("binance-0", 2000, bn("BTCUSDT", 100.80, 10, 100.82, 10))
+        self.rec.add("binance-0", 2020, bn("BTCUSDT", *BN_FLAT))                   # 20 ms: gone at +30
+        res = run(self.rec, fee_levels=(20,))
+        at10 = pa.report(res, ref_latency_ms=10).split("## 2c.")[1].split("\n## 3.")[0]
+        at30 = pa.report(res, ref_latency_ms=30).split("## 2c.")[1].split("\n## 3.")[0]
+        self.assertEqual(len([ln for ln in at10.splitlines() if ln.startswith("| BTCUSDT |")]), 2)
+        self.assertEqual(len([ln for ln in at30.splitlines() if ln.startswith("| BTCUSDT |")]), 1)
+
+    def test_report_without_normal_feed_episodes_says_so(self):
+        self.rec.add("binance-0", 1000, bn("BTCUSDT", 100.50, 10, 100.52, 10))
+        self.rec.add("binance-0", 1040, bn("BTCUSDT", *BN_FLAT))
+        out = pa.report(run(self.rec, fee_levels=(20,)))
+        self.assertIn("## 2c. Episode terbesar", out)
+        self.assertIn("tidak ada episode feed normal", out)
+
+
 if __name__ == "__main__":
     unittest.main()
